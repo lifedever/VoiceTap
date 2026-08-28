@@ -8,9 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let ptt = PTTController()
     private let diagnostics = DiagnosticsWindowController()
     private let audioWatcher = AudioDeviceWatcher()
-    private lazy var permissionsWindow = PermissionsWindowController()
-    private lazy var aboutWindow = AboutWindowController()
-    private lazy var settingsWindow = SettingsWindowController()
+    private let settingsModel = SettingsViewModel()
+    private lazy var settingsWindow = SettingsWindowController(model: settingsModel)
     private let updater = UpdateChecker()
 
     /// 权限状态轮询。用户是在系统设置里授权的，没有通知可订阅，
@@ -56,14 +55,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 换触发键时先把旧的那个释放掉，顺序不能反：
         // 用新键去 release 等于旧键永远卡在按下状态
-        settingsWindow.onTriggerChanged = { [weak self] in
+        settingsModel.onTriggerChanged = { [weak self] in
             self?.ptt.forceRelease(reason: "切换触发键")
         }
-        settingsWindow.onBehaviorChanged = { [weak self] in
+        settingsModel.onMonitorSettingChanged = { [weak self] in
             self?.restartMonitor()
-            if Settings.shared.autoSwitchMicToHeadset, self?.isHeadsetConnected == true {
-                self?.switchMicToHeadset(auto: true)
-            }
+        }
+        settingsModel.onAutoMicEnabled = { [weak self] in
+            guard self?.isHeadsetConnected == true else { return }
+            self?.switchMicToHeadset(auto: true)
+        }
+        settingsModel.onCheckUpdates = { [weak self] in
+            self?.updater.check(userInitiated: true)
+        }
+
+        // 用户可能在系统设置里改了权限或登录项再切回来，重新对一次账
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.settingsModel.refreshSystemState() }
         }
     }
 
@@ -248,11 +258,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 缺权限 = 整个功能静默失效（按线控毫无反应、也不报错）。
         // 这种情况必须主动弹窗，不能只把状态藏在菜单里等用户自己发现。
-        permissionsWindow.onPermissionsChanged = { [weak self] in
-            self?.handlePermissionChange()
-        }
         if !Permissions.allGranted {
-            presentWindow { self.permissionsWindow.show() }
+            presentWindow { self.settingsWindow.show(pane: .permissions) }
         }
 
         startPermissionPolling()
@@ -273,6 +280,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let granted = Permissions.allGranted
         defer { updateIcon() }
 
+        // 设置窗口开着时，权限那一栏要跟着系统里的改动实时更新
+        if settingsWindow.windowRef?.isVisible == true {
+            settingsModel.refreshSystemState()
+        }
+
         guard granted != lastPermissionsGranted else { return }
         lastPermissionsGranted = granted
 
@@ -284,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             diagnostics.append("权限被撤销，功能已失效")
             ptt.forceRelease(reason: "权限撤销")
-            presentWindow { self.permissionsWindow.show() }
+            presentWindow { self.settingsWindow.show(pane: .permissions) }
         }
     }
 
@@ -299,12 +311,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 菜单动作
 
     @objc private func toggleEnabled(_ sender: NSMenuItem) {
-        Settings.shared.enabled.toggle()
-        restartMonitor()
+        // 走 model 而不是直接改 Settings：设置窗口开着时那个开关要跟着动，
+        // 两处各改各的迟早出现「菜单说开着、设置里显示关着」
+        settingsModel.enabled.toggle()
     }
 
     @objc private func openSettings(_ sender: NSMenuItem) {
         presentWindow { self.settingsWindow.show() }
+    }
+
+    @objc private func openPermissionsPane(_ sender: NSMenuItem) {
+        presentWindow { self.settingsWindow.show(pane: .permissions) }
     }
 
     @objc private func fixMicNow(_ sender: NSMenuItem) {
@@ -328,11 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openAbout(_ sender: NSMenuItem) {
-        presentWindow { self.aboutWindow.show() }
-    }
-
-    @objc private func checkForUpdates(_ sender: NSMenuItem) {
-        updater.check(userInitiated: true)
+        presentWindow { self.settingsWindow.show(pane: .about) }
     }
 
 
@@ -343,8 +356,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 否则窗口在 Cmd-Tab 里找不到、也无法从 Dock 切回来。
 
     private var managedWindows: [NSWindow] {
-        [permissionsWindow.window, aboutWindow.window,
-         settingsWindow.window, diagnostics.window].compactMap { $0 }
+        [settingsWindow.windowRef, diagnostics.window].compactMap { $0 }
     }
 
     private func presentWindow(_ present: () -> Void) {
@@ -366,10 +378,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let stillOpen = managedWindows.contains { $0 !== closing && $0.isVisible }
         guard !stillOpen else { return }
         NSApp.setActivationPolicy(.accessory)
-    }
-
-    @objc private func openPermissions(_ sender: NSMenuItem) {
-        presentWindow { self.permissionsWindow.show() }
     }
 
     @objc private func quit(_ sender: NSMenuItem) {
@@ -435,18 +443,15 @@ extension AppDelegate: NSMenuDelegate {
         // 菜单里没法承载录制交互
         menu.addItem(disabledItem("触发键：\(Settings.shared.triggerShortcut.displayString)"))
 
-        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
-        menu.addItem(.separator())
-
-        // 权限。统一一个入口，别让用户在菜单里逐项点。
-        let permTitle = missingPermissionNames.map { "权限设置…（缺少\($0)）" } ?? "权限设置…（已全部授权）"
-        let permItem = NSMenuItem(title: permTitle,
-                                  action: #selector(openPermissions(_:)), keyEquivalent: "")
-        permItem.target = self
-        menu.addItem(permItem)
+        // 缺权限时才在菜单里露出入口。这是异常状态，值得占一行；
+        // 都授权了就不必——设置窗口里有完整的权限页。
+        if let missing = missingPermissionNames {
+            menu.addItem(.separator())
+            let permItem = NSMenuItem(title: "缺少\(missing)权限，点此处理",
+                                      action: #selector(openPermissionsPane(_:)), keyEquivalent: "")
+            permItem.target = self
+            menu.addItem(permItem)
+        }
 
         menu.addItem(.separator())
 
@@ -454,13 +459,10 @@ extension AppDelegate: NSMenuDelegate {
         diagItem.target = self
         menu.addItem(diagItem)
 
-        let updateItem = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
-        updateItem.target = self
-        menu.addItem(updateItem)
-
-        let aboutItem = NSMenuItem(title: "关于 \(AppInfo.name)…", action: #selector(openAbout(_:)), keyEquivalent: "")
-        aboutItem.target = self
-        menu.addItem(aboutItem)
+        // 检查更新和关于都并进设置窗口了，这里只留一个入口
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         let quitItem = NSMenuItem(title: "退出 VoiceTap", action: #selector(quit(_:)), keyEquivalent: "q")
         quitItem.target = self

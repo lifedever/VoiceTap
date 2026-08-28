@@ -108,4 +108,15 @@ struct Shortcut: Codable, Equatable {
         if flags.contains(.command) { result.insert(.maskCommand) }
         return result.rawValue
     }
+
+    /// CGEvent 版本。录制走 EventTap，拿到的是 `CGEventFlags`。
+    static func normalizeCG(_ flags: CGEventFlags) -> UInt64 {
+        var result: CGEventFlags = []
+        if flags.contains(.maskSecondaryFn) { result.insert(.maskSecondaryFn) }
+        if flags.contains(.maskControl) { result.insert(.maskControl) }
+        if flags.contains(.maskAlternate) { result.insert(.maskAlternate) }
+        if flags.contains(.maskShift) { result.insert(.maskShift) }
+        if flags.contains(.maskCommand) { result.insert(.maskCommand) }
+        return result.rawValue
+    }
 }
