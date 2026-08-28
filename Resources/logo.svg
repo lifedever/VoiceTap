@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- 白底。参考 Chrome / Slack 那一路：浅色底 + 彩色主体。
+         不用纯白 #FFF —— 在浅色 Dock 背景上会糊成一片没有边界，
+         底部压一点点冷灰做出微妙的体积感 -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F2F3F7"/>
+    </linearGradient>
+
+    <!-- 主体：蓝紫渐变，科技感 + 语音，避开系统音乐(红/粉)与播客(纯紫) -->
+    <linearGradient id="fg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#4F7CFF"/>
+      <stop offset="100%" stop-color="#8B5CF6"/>
+    </linearGradient>
+
+    <linearGradient id="sparkleFg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8B5CF6"/>
+      <stop offset="100%" stop-color="#A855F7"/>
+    </linearGradient>
+
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#4F7CFF" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <!-- 背景：macOS Big Sur+ 圆角矩形规范 -->
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#bg)"/>
+
+  <!-- 白底图标需要一圈极淡的描边，否则在白色/浅灰背景上边界会消失 -->
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" ry="184.5"
+        fill="none" stroke="#000000" stroke-opacity="0.07" stroke-width="1"/>
+
+  <g filter="url(#softShadow)">
+    <!-- 耳机头梁。线宽给足，16x16 下仍要能辨认出形状 -->
+    <path d="M 322 560 A 190 190 0 0 1 702 560"
+          fill="none" stroke="url(#fg)" stroke-width="62" stroke-linecap="round"/>
+
+    <!-- 左右耳罩 -->
+    <rect x="262" y="536" width="120" height="212" rx="60" ry="60" fill="url(#fg)"/>
+    <rect x="642" y="536" width="120" height="212" rx="60" ry="60" fill="url(#fg)"/>
+
+    <!-- 右上角 sparkle：语音 / AI 标记，与状态栏图标同一套视觉语言。
+         位置避开头梁弧线，无需描边分离 -->
+    <path d="M 762 232
+             C 762 316, 800 354, 884 354
+             C 800 354, 762 392, 762 476
+             C 762 392, 724 354, 640 354
+             C 724 354, 762 316, 762 232 Z"
+          fill="url(#sparkleFg)"/>
+  </g>
+</svg>

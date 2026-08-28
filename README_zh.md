@@ -1,0 +1,92 @@
+<h3 align="center">🎧 VoiceTap</h3>
+
+<p align="center">
+  <strong>让耳机扩展你的语音输入</strong><br>
+  长按有线耳机线控上的按钮说话，松开即成文字。
+</p>
+
+<p align="center">
+  <a href="https://github.com/lifedever/VoiceTap/stargazers"><img src="https://img.shields.io/github/stars/lifedever/VoiceTap?style=flat-square&color=F59E0B&label=Stars" alt="Stars"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-blue?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Swift-6.0-F05138?style=flat-square" alt="Swift">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
+</p>
+
+<p align="center">
+  <a href="https://www.lifedever.com/">🌐 <strong>官网</strong></a> ｜ <a href="#安装">🚀 <strong>快速开始</strong></a> ｜ <a href="https://www.lifedever.com/">💖 <strong>赞助</strong></a>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a>
+</p>
+
+---
+
+## 为什么做这个
+
+macOS 上用语音输入要长按 `fn`——手必须从当前动作离开、回到键盘。而如果你正戴着耳机，那颗按钮就在线上，触手可及。
+
+VoiceTap 把线控按钮映射到输入法的「按住说话」快捷键：
+
+```
+线控按键 --HID--> VoiceTap --合成按键--> 输入法 PTT --> 出字
+```
+
+它还解决了问题的另一半：确保录音真的走**耳机麦克风**，而不是电脑内置麦。
+
+## 功能
+
+- **按住说话** —— 长按中键，说话，松开。文字落在光标处。
+- **单击照常控制播放** —— 播放/暂停被合成回去，不会因为接管线控而失去媒体控制。
+- **音量键照常可用** —— 同上。
+- **麦克风输入源管理** —— 查看当前输入设备、从菜单直接切换，也可以设置成插入耳机时自动切到耳机麦。
+- **麦克风走错会提示** —— 耳机插着却在用内置麦录音，这件事用户很难自己察觉，VoiceTap 会直接指出来。
+- **实时事件监视器** —— 看清楚抓到了哪些 HID 事件、合成了什么按键。让「按了没反应」变得可排查。
+- **自动更新** —— 检查 GitHub Releases，原地安装，权限授权不丢失。
+
+## 环境要求
+
+- macOS 14+
+- 带线控的有线耳机（Apple EarPods 及同类）
+- 支持「按住说话」的输入法（微信输入法开箱即用）
+
+## 安装
+
+从 [Releases](https://github.com/lifedever/VoiceTap/releases/latest) 下载对应架构的 DMG，拖进「应用程序」后启动。
+
+或从源码构建：
+
+```bash
+git clone https://github.com/lifedever/VoiceTap.git
+cd VoiceTap
+./build.sh && ./install.sh
+```
+
+## 权限
+
+VoiceTap 需要两个权限。**缺任何一个都会静默失效**——按线控毫无反应，也不报错。所以 app 启动时会主动检查并明确告诉你缺哪一项。
+
+| 权限 | 用途 |
+|---|---|
+| **输入监控** | 读取耳机线控的按键 |
+| **辅助功能** | 把快捷键发送给输入法 |
+
+## 工作原理
+
+触发键默认是 `fn`，与微信输入法「按住说话」的默认快捷键一致，无需任何配置。
+
+如果合成 `fn` 在你的输入法上不生效，从菜单的**触发键**里选一个普通组合键（比如 `⌃⌥⌘Z`），再把输入法的「按住说话」快捷键改成同一个。`fn` 是特殊修饰键，走的代码路径与普通按键不同，普通组合键可靠性更高。
+
+## 排查
+
+菜单 → **事件监视器**，然后长按线控。
+
+| 看到什么 | 说明 |
+|---|---|
+| 什么都没有 | 按键没到达 app —— 检查「输入监控」权限 |
+| 有 `中键(播放/暂停) 按下`，之后没了 | 没达到长按阈值 —— 在菜单里把阈值调小 |
+| 有 `长按 → 按下 fn`，但语音没起来 | 合成的按键没被输入法接受 —— 换成普通组合键 |
+
+## 许可证
+
+MIT © lifedever

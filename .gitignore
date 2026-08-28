@@ -1,0 +1,24 @@
+# AI 助手相关文件，不进开源仓库
+CLAUDE.md
+AGENTS.md
+.claude/
+.cursor/
+.cursorrules
+.aider*
+.github/copilot-instructions.md
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+
+# 构建产物
+.release/
+build/
+
+# 系统
+.DS_Store
+
+# 运行时产物
+*.log
