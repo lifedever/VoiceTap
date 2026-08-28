@@ -12,14 +12,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var settingsWindow = SettingsWindowController(model: settingsModel)
     private let updater = UpdateChecker()
 
-    /// 权限状态轮询。用户是在系统设置里授权的，没有通知可订阅，
-    /// 只能自己发现「刚被授权 / 刚被撤销」。
-    private var permissionTimer: Timer?
+    /// 外部状态轮询。权限是用户在系统设置里改的，没有通知可订阅，
+    /// 只能自己发现「刚被授权 / 刚被撤销」；耳机在场也在这里兜底对账。
+    private var stateTimer: Timer?
     private var lastPermissionsGranted = false
 
-    /// 被 HID 接管的设备。注意这**不**代表耳机插着——
-    /// 插孔的 HID 节点是常驻的，是否真的插了耳机以 audioWatcher 为准。
+    /// 被 HID 接管的设备。注意这**不**直接代表耳机插着——
+    /// 3.5mm 插孔的 HID 节点是常驻的，只有 `isRemovable` 的那些才算证据。
     private var devices: [HeadsetDeviceInfo] = []
+
+    /// 「耳机在场」的唯一事实源，由 `refreshHeadsetPresence()` 维护。
+    private var headsetPresent = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 所有全局入口都在这里注册。
@@ -39,11 +42,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 上次若是崩溃退出的，修饰键可能还卡在按下状态，先清干净
         KeySynthesizer.clearModifiers()
 
-        // 耳机插拔的唯一可靠信号源。HID 节点常驻，给不出这个信息。
-        audioWatcher.onChange = { [weak self] plugged in
-            self?.handleHeadsetPlugChange(plugged)
+        audioWatcher.onChange = { [weak self] _ in
+            self?.refreshHeadsetPresence()
         }
         audioWatcher.start()
+
+        // 启动时把聚合状态对齐到真实值，不当成「刚插入」处理——
+        // 否则每次启动都会刷一条「耳机已插入」并触发一次自动切麦。
+        // 图标是在这之前画的（那时状态还是初始值），这里补一次，
+        // 不然耳机插着也要等轮询过一轮才纠正。
+        headsetPresent = audioWatcher.isPluggedIn
+        updateIcon()
 
         buildMainMenu()
         observeSleep()
@@ -114,9 +123,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    /// 重算「耳机在不在」。两路信号源互补，都不能单独作数：
+    ///
+    /// - **Core Audio**（`audioWatcher`）：3.5mm 唯一可靠的插拔信号（HID 节点常驻），
+    ///   同时也覆盖 USB 耳机（整个音频设备随插拔增删）。
+    /// - **HID**：兜住「有线控、但认不出对应音频设备」的边缘设备
+    ///   （只算 `isRemovable` 的——3.5mm 那个常驻节点在这里永远不作数）。
+    ///
+    /// 收敛成一个状态再比对，同一次插拔两路都报也只会处理一次。
+    private func refreshHeadsetPresence() {
+        let present = audioWatcher.isPluggedIn || devices.contains(where: \.isRemovable)
+        guard present != headsetPresent else {
+            updateIcon()
+            return
+        }
+        headsetPresent = present
+        handleHeadsetPlugChange(present)
+    }
+
     private func handleHeadsetPlugChange(_ plugged: Bool) {
         if plugged {
-            diagnostics.append("耳机已插入")
+            let mic = AudioDeviceWatcher.headsetInputDevice()
+            diagnostics.append("耳机已插入\(mic.map { "：\($0.name)" } ?? "")")
             // 系统大多数时候会自己把输入切到耳机麦，但会记住上次选择、
             // 也可能被别的 app 抢走。开了这个开关就由我们兜底。
             // 稍等一下再切：插入瞬间系统自己也在调整，太早切会被覆盖。
@@ -218,8 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.toolTip = "VoiceTap — \(statusText)"
     }
 
-    /// 以音频设备为准，不看 HID —— 插孔的 HID 节点常驻，用它判断会永远显示「已接入」
-    private var isHeadsetConnected: Bool { audioWatcher.isPluggedIn }
+    private var isHeadsetConnected: Bool { headsetPresent }
 
     /// 不能只说「未接入」：停用和缺权限时同样没法工作，
     /// 混为一谈会让人一直去查耳机而不是去查权限。
@@ -262,17 +289,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentWindow { self.settingsWindow.show(pane: .permissions) }
         }
 
-        startPermissionPolling()
+        startStatePolling()
 
         if Settings.shared.enabled {
             monitor.start(seize: Settings.shared.seizeDevice)
         }
     }
 
-    private func startPermissionPolling() {
-        permissionTimer?.invalidate()
-        permissionTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.handlePermissionChange() }
+    /// 轮询那些没有可靠通知的外部状态：权限（系统不发通知）、
+    /// 耳机在场（Core Audio 的 listener 会在设备刚出现、声道配置还没就绪时误判一拍）。
+    private func startStatePolling() {
+        stateTimer?.invalidate()
+        stateTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.handlePermissionChange()
+                self?.audioWatcher.recheck()
+            }
         }
     }
 
@@ -399,7 +431,16 @@ extension AppDelegate: NSMenuDelegate {
         menu.addItem(disabledItem(menuStatusText))
 
         if isHeadsetConnected {
-            for device in devices {
+            // 3.5mm 那个 HID 节点是常驻的，插孔空着时它仍在列表里。
+            // 直接列出去会让人以为线控抓到了，得先确认插孔真的占着。
+            let jackOccupied = AudioDeviceWatcher.builtInJackOccupied()
+            let controls = devices.filter { $0.isRemovable || jackOccupied }
+
+            if controls.isEmpty {
+                // 耳机在，线控却没抓到 —— 说清楚，别让人以为按了没反应是自己的问题
+                menu.addItem(disabledItem("未检测到线控按键"))
+            }
+            for device in controls {
                 let mode = device.isSeized ? "独占" : "共享"
                 menu.addItem(disabledItem("线控：\(device.product)（\(mode)）"))
             }
@@ -488,12 +529,14 @@ extension AppDelegate: HeadsetMonitorDelegate {
 
     func headsetDevicesChanged(_ devices: [HeadsetDeviceInfo]) {
         self.devices = devices
-        updateIcon()
+        // USB 耳机的插拔在 HID 这一路也会到，交给聚合器去重
+        refreshHeadsetPresence()
     }
 
     func headsetDeviceRemoved(_ product: String) {
         // 拔出瞬间可能正按着中键。那次「松开」永远不会来，
         // 不在这里释放，触发键就永久卡在按下状态。
+        // 不等聚合器：那要等随后的 devicesChanged，键会多卡一个来回。
         ptt.forceRelease(reason: "耳机拔出")
         updateIcon()
     }

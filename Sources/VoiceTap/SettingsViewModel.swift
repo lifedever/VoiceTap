@@ -65,6 +65,9 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var launchState: LaunchAtLogin.State
     @Published private(set) var inputDevices: [AudioInputDevice] = []
     @Published private(set) var currentInputUID: String = ""
+    /// 有耳机麦在场。只服务于下面的 `micMismatched`，所以判据是「存在耳机的输入设备」，
+    /// 比状态栏那个「耳机在场」窄一档——没有麦克风的耳机在这里不算，
+    /// 那种情况下也谈不上「录音走没走耳机麦」。
     @Published private(set) var headsetPluggedIn = false
     @Published private(set) var inputMonitoring: Permissions.State = .unknown
     @Published private(set) var accessibility: Permissions.State = .unknown

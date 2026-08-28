@@ -20,6 +20,13 @@ struct HeadsetDeviceInfo {
     let product: String
     let transport: String
     let isSeized: Bool
+
+    /// 这个 HID 节点是不是随耳机拔插而增删的。
+    ///
+    /// 3.5mm 插孔（transport = Audio）的节点是驱动**常驻**发布的，插不插耳机都在，
+    /// 拿它判断「已接入」会永远为真——那条路只能问 Core Audio。
+    /// USB 耳机的节点则是真的随插拔出现和消失，它在场就说明耳机在场。
+    var isRemovable: Bool { transport != "Audio" }
 }
 
 @MainActor
