@@ -73,9 +73,13 @@ VoiceTap needs two permissions. **Without either one it fails silently** — pre
 
 ## How it works
 
-The trigger key defaults to `fn`, matching WeType's default push-to-talk shortcut — no configuration needed.
+VoiceTap does not know your input method exists. It just **presses a key** — whoever listens for that key responds. So the only rule is:
 
-If synthesizing `fn` does not work with your input method, pick a regular combination from **Trigger Key** in the menu (e.g. `⌃⌥⌘Z`) and set your input method's push-to-talk shortcut to the same combination. `fn` is a special modifier and goes through a different code path than normal keys, so the plain combination is more reliable.
+> Set VoiceTap's trigger key to the same shortcut your input method uses for push-to-talk.
+
+Open **Settings** and click the trigger key field to record any combination you like — a bare modifier such as `fn`, or something like `⌃⌥⌘Z`. It defaults to `fn`, which matches WeType's factory setting, so it usually works with no configuration at all.
+
+If a bare `fn` proves unreliable with your input method, record a regular combination instead and change the input method's shortcut to match. `fn` is a special modifier and travels a different code path than normal keys.
 
 ## Troubleshooting
 

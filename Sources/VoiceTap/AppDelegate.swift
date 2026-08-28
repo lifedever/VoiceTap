@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let audioWatcher = AudioDeviceWatcher()
     private lazy var permissionsWindow = PermissionsWindowController()
     private lazy var aboutWindow = AboutWindowController()
+    private lazy var settingsWindow = SettingsWindowController()
     private let updater = UpdateChecker()
 
     /// 权限状态轮询。用户是在系统设置里授权的，没有通知可订阅，
@@ -52,6 +53,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         updater.onLog = { [weak self] message in self?.diagnostics.append(message) }
         updater.startPeriodicChecks()
+
+        // 换触发键时先把旧的那个释放掉，顺序不能反：
+        // 用新键去 release 等于旧键永远卡在按下状态
+        settingsWindow.onTriggerChanged = { [weak self] in
+            self?.ptt.forceRelease(reason: "切换触发键")
+        }
+        settingsWindow.onBehaviorChanged = { [weak self] in
+            self?.restartMonitor()
+            if Settings.shared.autoSwitchMicToHeadset, self?.isHeadsetConnected == true {
+                self?.switchMicToHeadset(auto: true)
+            }
+        }
     }
 
     /// 状态栏程序默认没有主菜单，于是 ⌘W / ⌘Q 这些标准快捷键全都不响应。
@@ -290,28 +303,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restartMonitor()
     }
 
-    @objc private func selectTriggerKey(_ sender: NSMenuItem) {
-        guard let key = TriggerKey(rawValue: sender.representedObject as? String ?? "") else { return }
-        ptt.forceRelease(reason: "切换触发键")
-        Settings.shared.triggerKey = key
-
-        if key.requiresIMEConfig {
-            showIMEConfigHint(for: key)
-        }
-    }
-
-    @objc private func selectThreshold(_ sender: NSMenuItem) {
-        guard let value = sender.representedObject as? Double else { return }
-        Settings.shared.longPressThreshold = value
-    }
-
-    @objc private func toggleSeize(_ sender: NSMenuItem) {
-        Settings.shared.seizeDevice.toggle()
-        restartMonitor()
-    }
-
-    @objc private func toggleSingleClick(_ sender: NSMenuItem) {
-        Settings.shared.singleClickPlayPause.toggle()
+    @objc private func openSettings(_ sender: NSMenuItem) {
+        presentWindow { self.settingsWindow.show() }
     }
 
     @objc private func fixMicNow(_ sender: NSMenuItem) {
@@ -330,14 +323,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateIcon()
     }
 
-    @objc private func toggleAutoSwitchMic(_ sender: NSMenuItem) {
-        Settings.shared.autoSwitchMicToHeadset.toggle()
-        // 刚打开就立刻应用一次，不用等下次插拔
-        if Settings.shared.autoSwitchMicToHeadset, isHeadsetConnected {
-            switchMicToHeadset(auto: true)
-        }
-    }
-
     @objc private func openDiagnostics(_ sender: NSMenuItem) {
         presentWindow { self.diagnostics.show() }
     }
@@ -350,9 +335,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater.check(userInitiated: true)
     }
 
-    @objc private func toggleAutoCheckUpdates(_ sender: NSMenuItem) {
-        Settings.shared.autoCheckUpdates.toggle()
-    }
 
     // MARK: Dock 图标
     //
@@ -361,7 +343,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // 否则窗口在 Cmd-Tab 里找不到、也无法从 Dock 切回来。
 
     private var managedWindows: [NSWindow] {
-        [permissionsWindow.window, aboutWindow.window, diagnostics.window].compactMap { $0 }
+        [permissionsWindow.window, aboutWindow.window,
+         settingsWindow.window, diagnostics.window].compactMap { $0 }
     }
 
     private func presentWindow(_ present: () -> Void) {
@@ -393,21 +376,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.terminate(nil)
     }
 
-    private func showIMEConfigHint(for key: TriggerKey) {
-        let alert = NSAlert()
-        alert.messageText = "还需要在输入法里改一处设置"
-        alert.informativeText = """
-        你选择了「\(key.label)」作为触发键。
-
-        请打开微信输入法设置 → 语音 → 把「按住说话」的快捷键改成同一个键，\
-        否则按耳机线控时输入法收不到信号。
-
-        （默认的 fn 选项不需要改输入法设置。）
-        """
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "知道了")
-        alert.runModal()
-    }
 }
 
 // MARK: - 菜单构建
@@ -451,13 +419,6 @@ extension AppDelegate: NSMenuDelegate {
             item.state = (device.uid == current?.uid) ? .on : .off
             micMenu.addItem(item)
         }
-        micMenu.addItem(.separator())
-        let autoItem = NSMenuItem(title: "插入耳机时自动切换到耳机麦",
-                                  action: #selector(toggleAutoSwitchMic(_:)), keyEquivalent: "")
-        autoItem.target = self
-        autoItem.state = Settings.shared.autoSwitchMicToHeadset ? .on : .off
-        micMenu.addItem(autoItem)
-
         micItem.submenu = micMenu
         micItem.title = "麦克风输入：\(current?.name ?? "未知")"
         menu.addItem(micItem)
@@ -470,45 +431,13 @@ extension AppDelegate: NSMenuDelegate {
         enabledItem.state = Settings.shared.enabled ? .on : .off
         menu.addItem(enabledItem)
 
-        // 触发键
-        let triggerItem = NSMenuItem(title: "触发键", action: nil, keyEquivalent: "")
-        let triggerMenu = NSMenu()
-        for key in TriggerKey.allCases {
-            let item = NSMenuItem(title: key.label, action: #selector(selectTriggerKey(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = key.rawValue
-            item.state = (Settings.shared.triggerKey == key) ? .on : .off
-            triggerMenu.addItem(item)
-        }
-        triggerItem.submenu = triggerMenu
-        menu.addItem(triggerItem)
+        // 触发键只读显示，改在设置窗口里做——快捷键是录制出来的，
+        // 菜单里没法承载录制交互
+        menu.addItem(disabledItem("触发键：\(Settings.shared.triggerShortcut.displayString)"))
 
-        // 长按阈值
-        let thresholdItem = NSMenuItem(title: "长按阈值", action: nil, keyEquivalent: "")
-        let thresholdMenu = NSMenu()
-        for value in [0.2, 0.35, 0.5, 0.8] {
-            let item = NSMenuItem(title: String(format: "%.2f 秒", value),
-                                  action: #selector(selectThreshold(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = value
-            item.state = abs(Settings.shared.longPressThreshold - value) < 0.01 ? .on : .off
-            thresholdMenu.addItem(item)
-        }
-        thresholdItem.submenu = thresholdMenu
-        menu.addItem(thresholdItem)
-
-        let seizeItem = NSMenuItem(title: "独占线控（长按不暂停音乐）",
-                                   action: #selector(toggleSeize(_:)), keyEquivalent: "")
-        seizeItem.target = self
-        seizeItem.state = Settings.shared.seizeDevice ? .on : .off
-        menu.addItem(seizeItem)
-
-        let clickItem = NSMenuItem(title: "单击 = 播放/暂停",
-                                   action: #selector(toggleSingleClick(_:)), keyEquivalent: "")
-        clickItem.target = self
-        clickItem.state = Settings.shared.singleClickPlayPause ? .on : .off
-        clickItem.isEnabled = Settings.shared.seizeDevice
-        menu.addItem(clickItem)
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
 
@@ -528,12 +457,6 @@ extension AppDelegate: NSMenuDelegate {
         let updateItem = NSMenuItem(title: "检查更新…", action: #selector(checkForUpdates(_:)), keyEquivalent: "")
         updateItem.target = self
         menu.addItem(updateItem)
-
-        let autoUpdateItem = NSMenuItem(title: "每天自动检查更新",
-                                        action: #selector(toggleAutoCheckUpdates(_:)), keyEquivalent: "")
-        autoUpdateItem.target = self
-        autoUpdateItem.state = Settings.shared.autoCheckUpdates ? .on : .off
-        menu.addItem(autoUpdateItem)
 
         let aboutItem = NSMenuItem(title: "关于 \(AppInfo.name)…", action: #selector(openAbout(_:)), keyEquivalent: "")
         aboutItem.target = self

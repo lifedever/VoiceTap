@@ -77,9 +77,9 @@ final class PTTController {
         guard !isPTTActive, isButtonDown else { return }
         isPTTActive = true
 
-        let key = Settings.shared.triggerKey
+        let key = Settings.shared.triggerShortcut
         KeySynthesizer.press(key)
-        log("长按 → 按下 \(key.label)，开始说话")
+        log("长按 → 按下 \(key.displayString)，开始说话")
         onStateChange?(true)
 
         // 安全阀
@@ -95,9 +95,9 @@ final class PTTController {
         safetyTimer?.invalidate()
         safetyTimer = nil
 
-        let key = Settings.shared.triggerKey
+        let key = Settings.shared.triggerShortcut
         KeySynthesizer.release(key)
-        log("\(reason) → 释放 \(key.label)")
+        log("\(reason) → 释放 \(key.displayString)")
         onStateChange?(false)
     }
 

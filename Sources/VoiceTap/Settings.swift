@@ -19,9 +19,10 @@ final class Settings {
     }
 
     private init() {
+        // triggerKey 存的是编码后的 Data，缺省时由 triggerShortcut 的 getter
+        // 回落到 .fnOnly，不在这里注册
         defaults.register(defaults: [
             Key.enabled: true,
-            Key.triggerKey: TriggerKey.fn.rawValue,
             Key.longPressThreshold: 0.35,
             Key.seizeDevice: true,
             Key.singleClickPlayPause: true,
@@ -37,12 +38,18 @@ final class Settings {
         set { defaults.set(newValue, forKey: Key.enabled) }
     }
 
-    var triggerKey: TriggerKey {
+    /// 触发键。可以是任意组合，只要和输入法里设的那个一致即可。
+    var triggerShortcut: Shortcut {
         get {
-            let raw = defaults.string(forKey: Key.triggerKey) ?? TriggerKey.fn.rawValue
-            return TriggerKey(rawValue: raw) ?? .fn
+            guard let data = defaults.data(forKey: Key.triggerKey),
+                  let value = try? JSONDecoder().decode(Shortcut.self, from: data)
+            else { return .fnOnly }
+            return value
         }
-        set { defaults.set(newValue.rawValue, forKey: Key.triggerKey) }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: Key.triggerKey)
+        }
     }
 
     /// 按住多久算「长按」（秒）。低于这个值算单击。
