@@ -69,9 +69,24 @@ cat > "${CONTENTS}/Info.plist" <<PLIST
 PLIST
 
 echo "==> 签名"
-# ad-hoc 签名。注意：TCC 权限是跟 cdhash 绑的，每次重新构建 hash 都会变，
-# 「输入监控 / 辅助功能」授权可能需要重新给一次。
-codesign --force --deep --sign - "${APP_BUNDLE}" 2>&1 | sed 's/^/    /'
+# 优先用本机那张固定的代码签名证书（scripts/create-signing-cert.sh 创建）。
+#
+# 差别不是"更正规"，而是 TCC 授权保不保得住：ad-hoc 签名的 Designated Requirement
+# 里带 cdhash，每次编译都变，于是每重装一次「输入监控 / 辅助功能」的勾就全掉。
+# 而掉授权的表现是**静默的** —— 按线控毫无反应也不报错，会被一路误判成代码 bug。
+# 用固定证书签名后 DR 变成 certificate leaf，重新构建不再影响授权。
+# 查找不能加 -v：那是「只列受信任的」，自签名证书永远不在其中
+# （标成 CSSMERR_TP_NOT_TRUSTED）。codesign 不要求证书受信任，照样签得动。
+CERT_NAME="VoiceTap Local Signing"
+if security find-identity -p codesigning 2>/dev/null | grep -qF "${CERT_NAME}"; then
+    SIGN_ID="${CERT_NAME}"
+    echo "    证书: ${CERT_NAME}"
+else
+    SIGN_ID="-"
+    echo "    ⚠ 未找到本地签名证书，退回 ad-hoc —— 每次重装都要重给权限"
+    echo "      跑一次 ./scripts/create-signing-cert.sh 可以根治"
+fi
+codesign --force --deep --sign "${SIGN_ID}" "${APP_BUNDLE}" 2>&1 | sed 's/^/    /'
 
 echo ""
 echo "✅ 打包完成: ${APP_BUNDLE}"

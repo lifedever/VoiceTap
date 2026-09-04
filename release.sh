@@ -80,6 +80,14 @@ build_one() {
 </plist>
 PLIST
 
+    # 发布包**必须** ad-hoc，不要"统一"成 build.sh 那套本地证书。
+    # build.sh 用固定证书是为了开发时 TCC 授权不掉；把那张只在本机自签自用、
+    # 别处一律不受信任的证书发出去，用户拿到的是一个签名主体不明的包。
+    # 有 Developer ID 之前，ad-hoc 才是分发的正确形态。
+    #
+    # 副作用是好的：ad-hoc 的 DR 是 cdhash，用户装上必然是「未授权」状态，
+    # 于是每个发布包都真实走一遍首次授权路径 —— 而那条路径缺权限时是**静默失效**的
+    # （按线控毫无反应也不报错），最需要被真实走到。
     codesign --force --deep --sign - "${app}"
     codesign --verify --strict "${app}" && echo "    [${arch}] 签名校验通过"
 
