@@ -1,5 +1,39 @@
 import Foundation
 
+/// 线控中键触发语音输入的方式。
+enum TriggerMode: String, CaseIterable {
+    /// 按住说话：按下开始，松开结束。手一直占着，但绝不会忘记关。
+    case hold
+    /// 轻点一下开始，再轻点一下结束。
+    ///
+    /// rawValue 保持 `toggle` 不动：老配置里存的就是这个字符串，改了会让
+    /// 已经选过切换模式的用户悄悄退回按住说话。
+    case toggle
+
+    // 曾经有过第三种「按住片刻切换」，靠的是「rcd 只把短按当播放键」这个假设——
+    // **实测不成立，已删**。0.4 秒的按住照样被当成短按，停止那一下就唤起音乐 App。
+    // 「按住说话」之所以没这个毛病，是因为用户实际按住的是说话那几秒，
+    // 而不是因为跨过了 0.35 秒的阈值。这中间没有可用的时间窗口，别再试。
+
+    var title: String {
+        switch self {
+        case .hold: "按住说话，松开结束"
+        case .toggle: "轻点一下开始，再轻点结束"
+        }
+    }
+
+    /// 菜单里跟在「触发方式：」后面，不能用上面那句长的
+    var shortTitle: String {
+        switch self {
+        case .hold: "按住说话"
+        case .toggle: "轻点切换"
+        }
+    }
+
+    /// 是不是「松开手还继续录」的那一类。这类才需要自动停止、点图标终止这些收尾手段。
+    var keepsRecordingAfterRelease: Bool { self != .hold }
+}
+
 /// 配置。用 UserDefaults 就够——这里没有需要 SwiftData 的结构化数据，
 /// 也就不用趟 default.store 落在 Application Support 根目录那个坑。
 @MainActor
@@ -11,8 +45,10 @@ final class Settings {
     private enum Key {
         static let enabled = "enabled"
         static let triggerKey = "triggerKey"
+        static let triggerMode = "triggerMode"
         static let longPressThreshold = "longPressThreshold"
         static let seizeDevice = "seizeDevice"
+        static let preemptNowPlaying = "preemptNowPlaying"
         static let singleClickPlayPause = "singleClickPlayPause"
         static let autoSwitchMic = "autoSwitchMicToHeadset"
         static let autoCheckUpdates = "autoCheckUpdates"
@@ -23,6 +59,8 @@ final class Settings {
         // 回落到 .fnOnly，不在这里注册
         defaults.register(defaults: [
             Key.enabled: true,
+            Key.triggerMode: TriggerMode.hold.rawValue,
+            Key.preemptNowPlaying: true,
             Key.longPressThreshold: 0.35,
             Key.seizeDevice: true,
             Key.singleClickPlayPause: true,
@@ -52,7 +90,18 @@ final class Settings {
         }
     }
 
-    /// 按住多久算「长按」（秒）。低于这个值算单击。
+    /// 线控中键的触发方式。默认「按住说话」——那是不可能忘记关的那一种。
+    var triggerMode: TriggerMode {
+        get {
+            guard let raw = defaults.string(forKey: Key.triggerMode),
+                  let mode = TriggerMode(rawValue: raw)
+            else { return .hold }
+            return mode
+        }
+        set { defaults.set(newValue.rawValue, forKey: Key.triggerMode) }
+    }
+
+    /// 按住多久算「长按」（秒）。低于这个值算单击。仅「按住说话」模式用得上。
     var longPressThreshold: TimeInterval {
         get { defaults.double(forKey: Key.longPressThreshold) }
         set { defaults.set(newValue, forKey: Key.longPressThreshold) }
@@ -62,6 +111,16 @@ final class Settings {
     var seizeDevice: Bool {
         get { defaults.bool(forKey: Key.seizeDevice) }
         set { defaults.set(newValue, forKey: Key.seizeDevice) }
+    }
+
+    /// 抢占系统的「正在播放」位置，截下线控的播放命令。
+    ///
+    /// 默认**开**：轻点切换没有别的保护手段了（「按住片刻」那条路已证伪），
+    /// 关掉它这个模式必然被音乐 App 抢焦点、等于不可用。
+    /// 不想要它那些副作用的话，该换的是触发方式而不是这个开关。
+    var preemptNowPlaying: Bool {
+        get { defaults.bool(forKey: Key.preemptNowPlaying) }
+        set { defaults.set(newValue, forKey: Key.preemptNowPlaying) }
     }
 
     /// 独占后，把「单击 = 播放/暂停」合成回去。

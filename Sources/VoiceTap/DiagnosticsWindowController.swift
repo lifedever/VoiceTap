@@ -1,12 +1,22 @@
 import Cocoa
+import OSLog
 
 /// 事件监视器：实时显示抓到的线控事件和内部动作。
 ///
 /// 这个窗口不是可有可无的装饰——排查「按了没反应」时，
 /// 能一眼分清是「没抓到按键」还是「抓到了但合成没生效」，
 /// 比反复改代码猜快一个量级。
+///
+/// 同一份日志同时进 os_log，于是可以在窗口之外读到：
+///
+///     log show --last 5m --predicate 'subsystem == "com.lifedever.VoiceTap"'
+///
+/// 排查线控这类问题必须能和 `rcd` / `mediaremoted` 的系统日志按时间轴对齐，
+/// 只存在窗口的内存缓冲里就做不到这件事。
 @MainActor
 final class DiagnosticsWindowController {
+
+    private static let logger = Logger(subsystem: "com.lifedever.VoiceTap", category: "events")
 
     /// 暴露给 AppDelegate 判断「是否还有窗口开着」，用于切换 Dock 图标显示
     private(set) var window: NSWindow?
@@ -22,6 +32,9 @@ final class DiagnosticsWindowController {
     }()
 
     func append(_ message: String) {
+        // 公开可见：这些是设备名和内部动作，不含用户内容
+        Self.logger.notice("\(message, privacy: .public)")
+
         let line = "[\(formatter.string(from: Date()))] \(message)"
         buffer.append(line)
         if buffer.count > Self.maxLines {

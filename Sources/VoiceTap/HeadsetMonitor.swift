@@ -61,6 +61,14 @@ private func voicetapInputValueCallback(
     guard let button = HeadsetButton(rawValue: IOHIDElementGetUsage(element)) else { return }
 
     let pressed = IOHIDValueGetIntegerValue(value) == 1
+
+    // 时间戳必须在这里记，不能等到 delegate 里：MediaKeyBlocker 靠「HID 先到」
+    // 这个顺序来区分线控和键盘上的播放键，下面那一跳 main.async 的排队延迟
+    // 足以把顺序反过来。
+    if button == .playPause, pressed {
+        MediaKeySignal.shared.notePlay()
+    }
+
     let device = IOHIDElementGetDevice(element)
     let product = (IOHIDDeviceGetProperty(device, kIOHIDProductKey as CFString) as? String) ?? "?"
 

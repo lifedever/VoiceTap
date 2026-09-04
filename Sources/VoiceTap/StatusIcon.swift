@@ -38,6 +38,12 @@ enum StatusIcon {
     /// - Parameters:
     ///   - base: 主体符号名
     ///   - badge: 右上角标记
+    ///
+    /// 一律 template，跟着菜单栏前景色走，和旁边其他 app 的图标一致。
+    /// 不要给某个状态单独染色：菜单栏里只有你一个是彩的，看起来更像是坏了。
+    /// （另外 `button.contentTintColor` 那条路也走不通——它只作用于 template 图，
+    /// 而 template 图又由菜单栏按自己的规则上色，两头落空，
+    /// 结果是代码里写着红色、屏幕上是黑色。）
     static func make(base baseName: String, badge: Badge = .sparkle) -> NSImage? {
         let baseConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
         guard let base = NSImage(systemSymbolName: baseName, accessibilityDescription: nil)?

@@ -69,13 +69,24 @@ private struct GeneralPane: View {
 private struct TriggerPane: View {
     @ObservedObject var model: SettingsViewModel
 
+    private var triggerModeHint: String {
+        switch model.triggerMode {
+        case .hold:
+            "按住线控中键说话，松开出字。手离开按钮就一定会结束。"
+        case .toggle:
+            "轻点一下开始说话，手可以离开耳机，再轻点一下才结束。"
+            + "说话时状态栏图标变成波形，点它可以立刻结束；"
+            + "点鼠标或切到别的 App 也会自动结束，忘了关的话 2 分钟后兜底。"
+        }
+    }
+
     var body: some View {
         Form {
             Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("触发键")
-                        Text("长按线控时按下的快捷键")
+                        Text("说话期间按住的快捷键")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -94,23 +105,69 @@ private struct TriggerPane: View {
             }
 
             Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text("长按阈值")
-                        Spacer()
-                        Text(String(format: "%.2f 秒", model.longPressThreshold))
-                            .font(.system(size: 11).monospacedDigit())
-                            .foregroundStyle(.secondary)
+                Picker("触发方式", selection: Binding(
+                    get: { model.triggerMode },
+                    set: { model.triggerMode = $0 }
+                )) {
+                    ForEach(TriggerMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
                     }
-                    Slider(value: Binding(
-                        get: { model.longPressThreshold },
-                        set: { model.longPressThreshold = $0 }
-                    ), in: 0.15...1.0)
                 }
+                .pickerStyle(.radioGroup)
 
-                Text("按住超过这个时长才算长按；短于它算单击。")
+                Text(triggerModeHint)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+
+                if model.triggerMode == .toggle, !model.preemptNowPlaying {
+                    Label("轻点会被系统当成播放键，唤起音乐 App 并抢走输入焦点。"
+                          + "打开下面的「抢占正在播放」才能挡住。",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            if model.triggerMode == .hold {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("按住阈值")
+                            Spacer()
+                            Text(String(format: "%.2f 秒", model.longPressThreshold))
+                                .font(.system(size: 11).monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        Slider(value: Binding(
+                            get: { model.longPressThreshold },
+                            set: { model.longPressThreshold = $0 }
+                        ), in: 0.15...1.0)
+                    }
+
+                    Text("按住超过这个时长才算长按；短于它算单击。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if model.triggerMode == .toggle {
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { model.preemptNowPlaying },
+                        set: { model.preemptNowPlaying = $0 }
+                    )) {
+                        Text("抢占系统的「正在播放」")
+                    }
+                    .toggleStyle(.switch)
+
+                    Text("把 VoiceTap 注册成当前播放器，线控的播放命令就会落到它手里，"
+                         + "系统不再启动音乐 App。这是轻点切换唯一能挡住它的办法，"
+                         + "别关。代价：控制中心会显示 VoiceTap 在播放，"
+                         + "开着期间键盘上的播放键也会失效——命令同样只发到 VoiceTap。"
+                         + "介意的话改用「按住说话」，那个模式不需要这个开关。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section {
@@ -129,7 +186,13 @@ private struct TriggerPane: View {
                     Text("单击线控 = 播放/暂停")
                 }
                 .toggleStyle(.switch)
-                .disabled(!model.seizeDevice)
+                .disabled(!model.seizeDevice || model.triggerMode.keepsRecordingAfterRelease)
+
+                if model.triggerMode.keepsRecordingAfterRelease {
+                    Text("切换模式下中键用来开始/结束说话，播放控制补不回来；音量键不受影响。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
 
                 Text("独占后按键不再传给系统，长按说话时不会误暂停音乐；"
                      + "播放和音量控制由 VoiceTap 合成补回。")

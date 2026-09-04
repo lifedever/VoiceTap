@@ -4,9 +4,12 @@ import Cocoa
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem!
+    /// 说话期间会被临时从 statusItem 上摘下来，见 `updateStatusItemClickBehavior`
+    private var statusMenu: NSMenu!
     private let monitor = HeadsetMonitor()
     private let ptt = PTTController()
     private let diagnostics = DiagnosticsWindowController()
+    private let nowPlayingGuard = NowPlayingGuard()
     private let audioWatcher = AudioDeviceWatcher()
     private let settingsModel = SettingsViewModel()
     private lazy var settingsWindow = SettingsWindowController(model: settingsModel)
@@ -24,20 +27,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 「耳机在场」的唯一事实源，由 `refreshHeadsetPresence()` 维护。
     private var headsetPresent = false
 
+    /// 说话期间的自动停止监听，只在说话期间存在
+    private var autoStopMonitors: [Any] = []
+    private var autoStopActivation: NSObjectProtocol?
+    private var autoStopArmedAt: Date?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 所有全局入口都在这里注册。
         // 不挂在任何视图的生命周期上——后台启动时视图可能根本不会被创建，
         // 那样注册代码永不执行，功能会静默失效（PasteMemo issue #66）。
         setupStatusItem()
 
-        ptt.onStateChange = { [weak self] _ in
-            self?.updateIcon()
+        ptt.onStateChange = { [weak self] speaking in
+            guard let self else { return }
+            self.updateIcon()
+            self.updateStatusItemClickBehavior(speaking: speaking)
+            // 只有切换模式需要自动收尾。按住说话本来就有「松手」这条出口，
+            // 给它加自动停止只会在用户还按着按钮时把话截断。
+            if speaking, Settings.shared.triggerMode.keepsRecordingAfterRelease {
+                self.startAutoStopWatch()
+            } else {
+                self.stopAutoStopWatch()
+            }
         }
         ptt.onLog = { [weak self] message in
             self?.diagnostics.append(message)
         }
 
         monitor.delegate = self
+
+        nowPlayingGuard.onLog = { [weak self] message in self?.diagnostics.append(message) }
 
         // 上次若是崩溃退出的，修饰键可能还卡在按下状态，先清干净
         KeySynthesizer.clearModifiers()
@@ -62,13 +81,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updater.onLog = { [weak self] message in self?.diagnostics.append(message) }
         updater.startPeriodicChecks()
 
-        // 换触发键时先把旧的那个释放掉，顺序不能反：
+        // 换触发键/触发方式时先把当前按着的那个释放掉，顺序不能反：
         // 用新键去 release 等于旧键永远卡在按下状态
-        settingsModel.onTriggerChanged = { [weak self] in
-            self?.ptt.forceRelease(reason: "切换触发键")
+        settingsModel.onTriggerChanged = { [weak self] reason in
+            self?.ptt.forceRelease(reason: reason)
+            self?.refreshNowPlayingGuard()
         }
         settingsModel.onMonitorSettingChanged = { [weak self] in
             self?.restartMonitor()
+        }
+        settingsModel.onNowPlayingSettingChanged = { [weak self] in
+            self?.refreshNowPlayingGuard()
         }
         settingsModel.onAutoMicEnabled = { [weak self] in
             guard self?.isHeadsetConnected == true else { return }
@@ -199,6 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 退出前必须释放触发键，否则修饰键会永久卡在按下状态
         ptt.forceRelease(reason: "退出")
         monitor.stop()
+        nowPlayingGuard.stop()
         audioWatcher.stop()
     }
 
@@ -210,14 +234,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        statusMenu = menu
         statusItem.menu = menu
     }
 
+    /// 说话中点一下图标 = 立刻结束这次输入。
+    ///
+    /// NSStatusItem 一旦设了 `menu` 就吃掉点击、只弹菜单，和 action 互斥——
+    /// 所以说话期间把菜单摘下来换成 action，结束后装回去。右键仍然弹菜单：
+    /// 不能为了一个快捷出口把设置入口整个堵死。
+    ///
+    /// 摘下来就必须装得回去，否则菜单永久消失。唯一的装回路径是
+    /// `onStateChange(false)`，而所有 `endPTT` 出口都会走到它。
+    private func updateStatusItemClickBehavior(speaking: Bool) {
+        guard let button = statusItem?.button else { return }
+        if speaking {
+            statusItem.menu = nil
+            button.target = self
+            button.action = #selector(statusItemClicked(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        } else {
+            button.target = nil
+            button.action = nil
+            statusItem.menu = statusMenu
+        }
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            // 临时把菜单装回去弹一次。performClick 会一直阻塞到菜单关闭，
+            // 弹完要摘掉——留着的话下一次左键点击又变成弹菜单，
+            // 「点图标结束输入」就没了。
+            //
+            // 但只有「还在说话」才摘：菜单开着的这段时间里输入可能已经结束了
+            // （超时保护、耳机拔出、切了别的 App），那时 menu 是刚被装回去的正常状态，
+            // 再摘一次就永久摘掉了 —— 状态栏图标从此点不出菜单。
+            statusItem.menu = statusMenu
+            sender.performClick(nil)
+            if ptt.isPTTActive { statusItem.menu = nil }
+            return
+        }
+        ptt.forceRelease(reason: "点击状态栏图标")
+    }
+
+    // MARK: 说话中的自动停止
+    //
+    // 切换模式下触发键会一直按着，而它多半是 fn 这类修饰键：用户一旦去干别的
+    // （点鼠标、切到别的窗口），后续输入全都会带上这个修饰键，键盘行为整个错乱。
+    // 所以说话期间盯住这两件事，一发生就收尾。
+    //
+    // 监听只在说话期间存在。常驻一个全局事件监听既没必要，也多一份「忘了拆」的风险。
+
+    /// 刚开始说话的这一小段不算数：合成触发键会引起输入法弹面板之类的连锁反应，
+    /// 其中任何一步若碰巧激活了别的进程，语音输入会刚开就被自己停掉。
+    private static let autoStopGrace: TimeInterval = 0.6
+
+    private func startAutoStopWatch() {
+        stopAutoStopWatch()
+        autoStopArmedAt = Date()
+
+        let clicks: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: clicks, handler: { [weak self] _ in
+            Task { @MainActor in self?.autoStop(reason: "鼠标操作") }
+        }) {
+            autoStopMonitors.append(global)
+        }
+        // 本 app 内的点击（状态栏图标、设置窗口）到不了 global monitor
+        if let local = NSEvent.addLocalMonitorForEvents(matching: clicks, handler: { [weak self] event in
+            Task { @MainActor in self?.autoStop(reason: "鼠标操作") }
+            return event
+        }) {
+            autoStopMonitors.append(local)
+        }
+
+        autoStopActivation = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.autoStop(reason: "切换到其他 App") }
+        }
+    }
+
+    private func stopAutoStopWatch() {
+        for monitor in autoStopMonitors { NSEvent.removeMonitor(monitor) }
+        autoStopMonitors.removeAll()
+        if let observer = autoStopActivation {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            autoStopActivation = nil
+        }
+        autoStopArmedAt = nil
+    }
+
+    private func autoStop(reason: String) {
+        guard ptt.isPTTActive else { return }
+        if let armed = autoStopArmedAt, Date().timeIntervalSince(armed) < Self.autoStopGrace { return }
+        ptt.forceRelease(reason: reason)
+    }
+
     /// 图标状态，一眼看出当前状况，不占状态栏宽度：
-    ///   缺权限   —— 橙色警告三角（最高优先级：此时整个功能是废的）
-    ///   说话中   —— 红色波形
-    ///   已接入   —— 耳机
+    ///   缺权限   —— 耳机 + 角上感叹号（最高优先级：此时整个功能是废的）
+    ///   说话中   —— 波形
+    ///   已接入   —— 耳机 + sparkle
     ///   未接入   —— 耳机带斜杠
+    ///
+    /// 全部 template，跟菜单栏前景色走，和旁边其他 app 的图标一致。
     private func updateIcon() {
         guard let button = statusItem?.button else { return }
 
@@ -225,18 +344,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 但仍保留耳机主体 —— 换成纯警告三角会丢掉「这是哪个 app」的识别性，
         // 菜单栏里一排图标时根本认不出是谁在报警。
         if !Permissions.allGranted {
+            // 不染色：菜单栏图标就该跟其他图标一样跟随系统前景色（深色菜单栏下是白的），
+            // 单独染一个颜色出来反而显得是坏了。异常状态靠角上的感叹号区分就够。
             button.image = StatusIcon.make(base: "headphones", badge: .alert)
-            button.contentTintColor = .systemOrange
+            button.contentTintColor = nil
             button.toolTip = "VoiceTap — \(statusText)，点击查看"
             return
         }
 
         if ptt.isPTTActive {
-            button.image = NSImage(systemSymbolName: "waveform.circle.fill",
-                                   accessibilityDescription: "正在说话")
-            button.image?.isTemplate = false
-            button.contentTintColor = .systemRed
-            button.toolTip = "VoiceTap — 正在说话"
+            button.image = StatusIcon.make(base: "waveform", badge: .none)
+            button.contentTintColor = nil
+            button.toolTip = "VoiceTap — 正在说话，点击结束"
             return
         }
 
@@ -294,6 +413,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Settings.shared.enabled {
             monitor.start(seize: Settings.shared.seizeDevice)
         }
+        refreshNowPlayingGuard()
     }
 
     /// 轮询那些没有可靠通知的外部状态：权限（系统不发通知）、
@@ -328,6 +448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             diagnostics.append("权限被撤销，功能已失效")
             ptt.forceRelease(reason: "权限撤销")
+            refreshNowPlayingGuard()
             presentWindow { self.settingsWindow.show(pane: .permissions) }
         }
     }
@@ -338,6 +459,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if Settings.shared.enabled {
             monitor.start(seize: Settings.shared.seizeDevice)
         }
+        refreshNowPlayingGuard()
+    }
+
+    /// 抢占「正在播放」只在轻点切换下才有意义：按住说话和按住切换都不会让
+    /// `rcd` 发出播放命令（它只把短按当播放键），开着纯属白占控制中心的位置。
+    private func refreshNowPlayingGuard() {
+        let wanted = Settings.shared.enabled
+            && Settings.shared.preemptNowPlaying
+            && Settings.shared.triggerMode == .toggle
+        if wanted {
+            nowPlayingGuard.start()
+        } else {
+            nowPlayingGuard.stop()
+        }
     }
 
     // MARK: 菜单动作
@@ -346,6 +481,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 走 model 而不是直接改 Settings：设置窗口开着时那个开关要跟着动，
         // 两处各改各的迟早出现「菜单说开着、设置里显示关着」
         settingsModel.enabled.toggle()
+    }
+
+    @objc private func selectTriggerMode(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let mode = TriggerMode(rawValue: raw)
+        else { return }
+        // 走 model 而不是直接改 Settings：设置窗口开着时那个单选要跟着动，
+        // 而且它的 didSet 会先把正按着的触发键释放掉
+        settingsModel.triggerMode = mode
     }
 
     @objc private func openSettings(_ sender: NSMenuItem) {
@@ -480,8 +624,23 @@ extension AppDelegate: NSMenuDelegate {
         enabledItem.state = Settings.shared.enabled ? .on : .off
         menu.addItem(enabledItem)
 
-        // 触发键只读显示，改在设置窗口里做——快捷键是录制出来的，
-        // 菜单里没法承载录制交互
+        // 触发方式放菜单里：它是会随场景换的东西（安静场合按住说话，
+        // 长段口述切成按一下），埋在设置窗口里够不着。
+        // 触发键则相反——快捷键是录制出来的，菜单承载不了录制交互，只读显示。
+        let mode = Settings.shared.triggerMode
+        let modeItem = NSMenuItem(title: "触发方式：\(mode.shortTitle)", action: nil, keyEquivalent: "")
+        let modeMenu = NSMenu()
+        for candidate in TriggerMode.allCases {
+            let item = NSMenuItem(title: candidate.title,
+                                  action: #selector(selectTriggerMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = candidate.rawValue
+            item.state = (candidate == mode) ? .on : .off
+            modeMenu.addItem(item)
+        }
+        modeItem.submenu = modeMenu
+        menu.addItem(modeItem)
+
         menu.addItem(disabledItem("触发键：\(Settings.shared.triggerShortcut.displayString)"))
 
         // 缺权限时才在菜单里露出入口。这是异常状态，值得占一行；

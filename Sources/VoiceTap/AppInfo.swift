@@ -9,7 +9,7 @@ enum AppInfo {
     static let summary = "让耳机扩展你的语音输入"
 
     /// 副说明。麦克风管理也归这个 app，不写出来用户不会知道。
-    static let detail = "长按线控即可说话，并自动使用耳机麦克风录音"
+    static let detail = "按线控即可说话，并自动使用耳机麦克风录音"
 
     static let repo = "lifedever/VoiceTap"
 
