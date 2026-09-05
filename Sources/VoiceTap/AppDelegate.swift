@@ -181,6 +181,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // 拔出瞬间可能正按着中键，那次「松开」永远不会到达
             ptt.forceRelease(reason: "耳机拔出")
         }
+        // 「正在播放」位置跟着耳机走：插上才抢，拔了就还。
+        // 挂在这个聚合后的事件上而不是 HID 那条路上——位置晚一拍还回去无害，
+        // 不像触发键那样要抢时间。
+        refreshNowPlayingGuard()
         updateIcon()
     }
 
@@ -462,12 +466,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshNowPlayingGuard()
     }
 
-    /// 抢占「正在播放」只在轻点切换下才有意义：按住说话和按住切换都不会让
-    /// `rcd` 发出播放命令（它只把短按当播放键），开着纯属白占控制中心的位置。
+    /// 抢占「正在播放」只在轻点切换下才有意义：按住说话不会让 `rcd` 发出
+    /// 播放命令（它只把短按当播放键），开着纯属白占控制中心的位置。
+    ///
+    /// 同理，线控短按只有在**有线耳机在场且权限齐备**时才可能到来、才值得截：
+    /// 没耳机就没有那一下；没「输入监控」就收不到 HID 事件，时间窗永远不满足，
+    /// 每条命令都返回失败，位置却一直占着。任一条不成立都要把位置交还——
+    /// 占着的代价（控制中心被占、键盘播放键失效）是实打实的。
+    ///
+    /// 所以除了三个开关，每次耳机插拔（`handleHeadsetPlugChange`）和
+    /// 权限变化（`handlePermissionChange`）都要重新过一遍这里。
     private func refreshNowPlayingGuard() {
         let wanted = Settings.shared.enabled
             && Settings.shared.preemptNowPlaying
             && Settings.shared.triggerMode == .toggle
+            && headsetPresent
+            && Permissions.allGranted
         if wanted {
             nowPlayingGuard.start()
         } else {

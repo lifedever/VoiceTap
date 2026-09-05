@@ -43,13 +43,14 @@ final class MediaKeySignal: @unchecked Sendable {
 /// 唯一的介入点是 `resolvePlayerPath` 那一步：注册成 Now Playing App，
 /// 命令就会解析到我们身上，Music 不再被启动。
 ///
-/// **代价**（所以默认关，由 `Settings.preemptNowPlaying` 控制）：
-/// 控制中心会显示 VoiceTap 在播放；键盘上的播放键也会先到我们这儿。
-/// 后者用时间窗尽量还回去——不是线控来的就返回 `.commandFailed`，
-/// 让系统继续找下家。这条区分不保证 100% 可靠，是这个方案的固有代价。
+/// **代价**：控制中心会显示 VoiceTap 在播放；键盘上的播放键在占着期间失效
+/// （命令同样只发到我们这儿，见 `handleCommand`）。所以只在真正需要的窗口里占：
+/// 由 `AppDelegate.refreshNowPlayingGuard` 决定启停，条件是轻点切换模式、
+/// 开关打开（`Settings.preemptNowPlaying`，默认开——这个模式没有别的保护手段）、
+/// **有线耳机在场、权限齐备**。没耳机就不会有线控短按；没「输入监控」就收不到
+/// HID 事件，时间窗永远不满足，占着纯属白占。耳机插拔、权限变化都会重新评估。
 ///
-/// 更轻的替代是 `TriggerMode.toggleLongPress`：`rcd` 不把长按当播放键，
-/// 零副作用绕开整个问题。
+/// 「按住片刻切换」曾被当成零副作用的替代路线，**实测证伪已删**，见 `TriggerMode`。
 @MainActor
 final class NowPlayingGuard {
 

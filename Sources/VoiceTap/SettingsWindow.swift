@@ -162,8 +162,9 @@ private struct TriggerPane: View {
 
                     Text("把 VoiceTap 注册成当前播放器，线控的播放命令就会落到它手里，"
                          + "系统不再启动音乐 App。这是轻点切换唯一能挡住它的办法，"
-                         + "别关。代价：控制中心会显示 VoiceTap 在播放，"
-                         + "开着期间键盘上的播放键也会失效——命令同样只发到 VoiceTap。"
+                         + "别关。只在有线耳机接入期间生效，拔掉就交还。"
+                         + "代价：接入期间控制中心会显示 VoiceTap 在播放，"
+                         + "键盘上的播放键也会失效——命令同样只发到 VoiceTap。"
                          + "介意的话改用「按住说话」，那个模式不需要这个开关。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
