@@ -52,7 +52,7 @@ It also handles a third problem: making sure the recording actually goes through
 - **Microphone routing** — see which input device is active, switch it from the menu, and optionally auto-switch to the headset mic when you plug in.
 - **Warns when the mic is wrong** — headset plugged in but recording through the built-in mic is easy to miss; VoiceTap points it out.
 - **Live event monitor** — see exactly which HID events arrive and what gets synthesized. Makes "nothing happened" debuggable.
-- **Auto-update** — checks GitHub Releases, installs in place and relaunches. macOS will ask you to re-grant permissions after an update.
+- **Auto-update** — checks GitHub Releases, installs in place and relaunches, keeping your permission grants.
 
 ## Requirements
 

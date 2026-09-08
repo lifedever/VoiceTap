@@ -8,6 +8,8 @@ set -euo pipefail
 
 APP_NAME="VoiceTap"
 BUNDLE_ID="com.lifedever.VoiceTap"
+# 和 build.sh 用同一张，否则开发装的和发布装的会被 TCC 当成两个不同的 app
+CERT_NAME="VoiceTap Local Signing"
 
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
@@ -88,7 +90,28 @@ PLIST
     # 副作用是好的：ad-hoc 的 DR 是 cdhash，用户装上必然是「未授权」状态，
     # 于是每个发布包都真实走一遍首次授权路径 —— 而那条路径缺权限时是**静默失效**的
     # （按线控毫无反应也不报错），最需要被真实走到。
-    codesign --force --deep --sign - "${app}"
+    # 发布包也用那张固定证书，和 build.sh 同一张。
+    #
+    # 这不是"更正规"的问题，是**用户更新后还用不用重新勾权限**：
+    # ad-hoc 签名的 Designated Requirement 里带 cdhash，每次构建都变，
+    # 于是每升一次级，TCC 就把 app 当成新程序，「输入监控 / 辅助功能」
+    # 的授权全掉。而掉授权是**静默的** —— 按键毫无反应也不报错，
+    # 用户只会以为新版坏了。用固定证书签，DR 变成 certificate leaf，
+    # 版本怎么升都不影响授权（TabFlick 一直这么发，已验证）。
+    #
+    # ⚠️ 这张证书不能丢：换机器或清了钥匙串之后签出来的 DR 就变了，
+    #    所有用户会被要求重新授权一次。导出备份见 scripts/create-signing-cert.sh。
+    #
+    # 它换不来的：Gatekeeper 首次拦截仍在（那要 Apple 公证），
+    # 所以 release notes 里的 xattr / 「仍要打开」说明必须一直留着。
+    if security find-identity -p codesigning 2>/dev/null | grep -qF "${CERT_NAME}"; then
+        codesign --force --deep --sign "${CERT_NAME}" "${app}"
+    else
+        echo "    ⚠ [${arch}] 未找到「${CERT_NAME}」，退回 ad-hoc"
+        echo "      发出去的包会让所有用户在更新后重新授权一次"
+        echo "      跑一次 ./scripts/create-signing-cert.sh 可以根治"
+        codesign --force --deep --sign - "${app}"
+    fi
     codesign --verify --strict "${app}" && echo "    [${arch}] 签名校验通过"
 
     echo "==> [${arch}] 打包 DMG"
