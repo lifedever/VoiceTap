@@ -6,10 +6,10 @@ enum AppInfo {
     static let name = "VoiceTap"
 
     /// 一句话定位，从能力而非操作步骤切入。
-    static let summary = "让耳机扩展你的语音输入"
+    static let summary = "随手一按，就用你惯用的语音输入法说话"
 
-    /// 副说明。麦克风管理也归这个 app，不写出来用户不会知道。
-    static let detail = "按线控即可说话，并自动使用耳机麦克风录音"
+    /// 副说明。跨输入法调用和麦克风管理都归这个 app，不写出来用户不会知道。
+    static let detail = "按耳机线控或键盘快捷键说话，不必手动切换输入法"
 
     static let repo = "lifedever/VoiceTap"
 

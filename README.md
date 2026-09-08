@@ -1,8 +1,8 @@
 <h3 align="center">🎧 VoiceTap</h3>
 
 <p align="center">
-  <strong>Extend voice input to your headset.</strong><br>
-  Hold the button on your wired earbuds to talk — release and the text appears.
+  <strong>One press, and you are talking to your favorite voice IME.</strong><br>
+  Use the headset button or a keyboard shortcut — no manual input-method switching.
 </p>
 
 <p align="center">
@@ -32,10 +32,20 @@ VoiceTap maps that button to your input method's push-to-talk shortcut:
 headset button --HID--> VoiceTap --synthesized key--> IME push-to-talk --> text
 ```
 
-It also handles the other half of the problem: making sure the recording actually goes through the **headset microphone** rather than the built-in one.
+There is a nastier half: **an input method only responds to its voice shortcut while it is the active one.** So even if you prefer one vendor's recognition, typing in a different IME means switching over first — and remembering to switch back.
+
+VoiceTap borrows instead of switching: the target IME is held for the few seconds you speak, then handed straight back. Your own input method never changes.
+
+```
+hotkey --> borrow target IME --> synthesized key --> text --> restore
+```
+
+It also handles a third problem: making sure the recording actually goes through the **headset microphone** rather than the built-in one.
 
 ## Features
 
+- **Pick your voice IME** — choose from the input methods installed on your Mac (WeType, Doubao, …). Press the hotkey to talk through it; your own input method is restored the moment it finishes. The list is discovered at runtime, so an IME you install later shows up on its own.
+- **Global hotkey** — works in any app, with no headset plugged in.
 - **Hold to talk** — hold the center button, speak, release. The text lands wherever your cursor is.
 - **Single click still works** — play/pause is synthesized back, so you do not lose media control.
 - **Volume buttons still work** — same story.
@@ -47,8 +57,8 @@ It also handles the other half of the problem: making sure the recording actuall
 ## Requirements
 
 - macOS 14+
-- Wired headset with inline controls (Apple EarPods and similar)
-- An input method with a push-to-talk shortcut (WeType's "hold to talk" is supported out of the box)
+- At least one input method with voice input (WeType, Doubao, … — works out of the box)
+- Only if you want the headset trigger: wired earbuds with inline controls (Apple EarPods and similar)
 
 ## Installation
 
@@ -68,7 +78,7 @@ VoiceTap needs two permissions. **Without either one it fails silently** — pre
 
 | Permission | Why |
 |---|---|
-| **Input Monitoring** | Read the button presses from the headset |
+| **Input Monitoring** | Read headset button presses and the global hotkey |
 | **Accessibility** | Send the shortcut to your input method |
 
 ## How it works
