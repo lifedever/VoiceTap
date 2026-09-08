@@ -62,7 +62,13 @@ It also handles a third problem: making sure the recording actually goes through
 
 ## Installation
 
-Download the DMG for your architecture from [Releases](https://github.com/lifedever/VoiceTap/releases/latest), drag to Applications, and launch.
+Download the DMG for your architecture from [Releases](https://github.com/lifedever/VoiceTap/releases/latest) and drag it to Applications.
+
+If macOS says the developer cannot be verified, open **System Settings → Privacy & Security**, scroll down to VoiceTap and click **Open Anyway**. Or, from a terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/VoiceTap.app
+```
 
 Or build from source:
 

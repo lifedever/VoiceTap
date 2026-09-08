@@ -62,7 +62,13 @@ VoiceTap 的做法是「借一下就还」：按住快捷键的那几秒把目�
 
 ## 安装
 
-从 [Releases](https://github.com/lifedever/VoiceTap/releases/latest) 下载对应架构的 DMG，拖进「应用程序」后启动。
+从 [Releases](https://github.com/lifedever/VoiceTap/releases/latest) 下载对应架构的 DMG，拖进「应用程序」。
+
+首次打开如果提示无法验证开发者，去「系统设置 → 隐私与安全性」往下找到 VoiceTap，点「仍要打开」。嫌麻烦也可以在终端跑一行：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/VoiceTap.app
+```
 
 或从源码构建：
 
