@@ -52,6 +52,9 @@ final class Settings {
         static let singleClickPlayPause = "singleClickPlayPause"
         static let autoSwitchMic = "autoSwitchMicToHeadset"
         static let autoCheckUpdates = "autoCheckUpdates"
+        static let voiceInputMethodID = "voiceInputMethodID"
+        static let hotKeyEnabled = "hotKeyEnabled"
+        static let hotKey = "globalHotKey"
     }
 
     private init() {
@@ -133,6 +136,43 @@ final class Settings {
     var autoCheckUpdates: Bool {
         get { defaults.bool(forKey: Key.autoCheckUpdates) }
         set { defaults.set(newValue, forKey: Key.autoCheckUpdates) }
+    }
+
+    /// 用哪个输入法来做语音输入（`TISInputSourceID`）。
+    ///
+    /// 空 = 不指定，只对当前输入法发触发键（老行为：当前恰好是语音输入法时才有用）。
+    /// 指定了就会在触发时临时借用它，说完还回去——因为输入法非激活时**根本不响应**
+    /// 触发键，详见 `InputMethodSwitcher`。
+    var voiceInputMethodID: String? {
+        get {
+            let value = defaults.string(forKey: Key.voiceInputMethodID)
+            return (value?.isEmpty ?? true) ? nil : value
+        }
+        set { defaults.set(newValue ?? "", forKey: Key.voiceInputMethodID) }
+    }
+
+    /// 启用全局快捷键（键盘上按，不经耳机线控）
+    var hotKeyEnabled: Bool {
+        get { defaults.bool(forKey: Key.hotKeyEnabled) }
+        set { defaults.set(newValue, forKey: Key.hotKeyEnabled) }
+    }
+
+    /// 用户按的那个全局快捷键。
+    ///
+    /// 和 `triggerShortcut` 是两回事，别混：这个是**我们监听**的，
+    /// `triggerShortcut` 是我们**合成发给输入法**的。两者可以相同（默认都是 fn），
+    /// 那种情况下等于「把 fn 从系统手里接管过来，切好输入法再原样发出去」。
+    var hotKey: Shortcut {
+        get {
+            guard let data = defaults.data(forKey: Key.hotKey),
+                  let value = try? JSONDecoder().decode(Shortcut.self, from: data)
+            else { return .fnOnly }
+            return value
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: Key.hotKey)
+        }
     }
 
     /// 插入耳机时自动把麦克风输入切到耳机麦。

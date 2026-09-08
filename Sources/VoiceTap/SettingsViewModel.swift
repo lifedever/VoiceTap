@@ -18,6 +18,8 @@ final class SettingsViewModel: ObservableObject {
     var onAutoMicEnabled: (() -> Void)?
     /// 「抢占正在播放」开关变了，要跟着注册/注销
     var onNowPlayingSettingChanged: (() -> Void)?
+    /// 全局快捷键的开关或键位变了，要重新挂 / 撤掉 EventTap
+    var onHotKeySettingChanged: (() -> Void)?
     var onCheckUpdates: (() -> Void)?
 
     // MARK: 持久化配置
@@ -47,6 +49,40 @@ final class SettingsViewModel: ObservableObject {
         didSet {
             Settings.shared.triggerMode = triggerMode
             onTriggerChanged?("切换触发方式")
+            // 两种模式的 tap 类型不同（listenOnly / defaultTap），必须重建。
+            // 放在写配置之后：回调要按**新**模式决定建哪一种
+            onHotKeySettingChanged?()
+        }
+    }
+
+    /// 用哪个输入法做语音输入（`TISInputSourceID`，空串 = 不指定）。
+    ///
+    /// 写入顺序同 `triggerShortcut`：**先回调后写配置**。回调要用**旧**目标把
+    /// 可能正借着的输入法还回去，先写配置的话就变成拿新目标去还，
+    /// 用户原来的输入法再也回不来了。
+    @Published var voiceInputMethodID: String {
+        didSet {
+            onTriggerChanged?("切换语音输入法")
+            Settings.shared.voiceInputMethodID = voiceInputMethodID.isEmpty ? nil : voiceInputMethodID
+        }
+    }
+
+    @Published var hotKeyEnabled: Bool {
+        didSet {
+            onTriggerChanged?("切换全局快捷键开关")
+            Settings.shared.hotKeyEnabled = hotKeyEnabled
+            onHotKeySettingChanged?()
+        }
+    }
+
+    /// 用户按的全局快捷键。注意和 `triggerShortcut` 的分工：这个是**监听**的，
+    /// 那个是**合成发给输入法**的。
+    @Published var hotKey: Shortcut {
+        didSet {
+            // 先收尾：换了键之后旧键的「松开」永远不会再来，正按着的会卡住
+            onTriggerChanged?("切换全局快捷键")
+            Settings.shared.hotKey = hotKey
+            onHotKeySettingChanged?()
         }
     }
 
@@ -95,6 +131,17 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var inputMonitoring: Permissions.State = .unknown
     @Published private(set) var accessibility: Permissions.State = .unknown
 
+    /// 本机装了哪些有语音能力的输入法。
+    /// 这同样是**外部状态**——用户随时可能在系统设置里增删输入法，
+    /// 在 View 里现读会让 Picker 的选项和实际的对不上，所以镜像到这里。
+    @Published private(set) var voiceInputMethods: [VoiceInputMethod] = []
+
+    /// 选中的那个输入法已经不在了（被用户从系统设置里移除 / 卸载）。
+    /// 不提示的话表现是「按了没反应」，且毫无线索。
+    var selectedInputMethodMissing: Bool {
+        !voiceInputMethodID.isEmpty && !voiceInputMethods.contains { $0.id == voiceInputMethodID }
+    }
+
     /// 耳机插着，但录音走的不是耳机麦 —— 说的话会被电脑麦收进去，
     /// 用户几乎不可能自己发现
     var micMismatched: Bool {
@@ -118,6 +165,9 @@ final class SettingsViewModel: ObservableObject {
         preemptNowPlaying = Settings.shared.preemptNowPlaying
         autoSwitchMic = Settings.shared.autoSwitchMicToHeadset
         autoCheckUpdates = Settings.shared.autoCheckUpdates
+        voiceInputMethodID = Settings.shared.voiceInputMethodID ?? ""
+        hotKeyEnabled = Settings.shared.hotKeyEnabled
+        hotKey = Settings.shared.hotKey
         launchState = LaunchAtLogin.state
         refreshSystemState()
     }
@@ -131,6 +181,7 @@ final class SettingsViewModel: ObservableObject {
         headsetPluggedIn = inputDevices.contains(where: \.isHeadsetMic)
         inputMonitoring = Permissions.inputMonitoring
         accessibility = Permissions.accessibility
+        voiceInputMethods = InputMethodCatalog.voiceInputMethods()
     }
 
     // MARK: 动作

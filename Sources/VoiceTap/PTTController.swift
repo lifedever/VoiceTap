@@ -26,7 +26,18 @@ final class PTTController {
 
     private(set) var isPTTActive = false
 
+    /// 触发前把目标输入法借过来，说完还回去。
+    /// 输入法非激活时收到触发键会直接忽略，所以这一步不是优化而是前提。
+    let inputMethodSwitcher = InputMethodSwitcher()
+
     private var isButtonDown = false
+    /// 触发键当前是不是按下状态。切换输入法后 press 是延迟发的，
+    /// 这段时间里 release 不能发——否则会凭空多出一个没有配对的抬起。
+    private var triggerKeyIsDown = false
+    /// 排队中的「等输入法就绪后按下触发键」
+    private var pendingPress: DispatchWorkItem?
+    /// 全局热键的长按判定
+    private var hotKeyLongPressTimer: Timer?
     private var lastToggleAt: Date?
     private var longPressTimer: Timer?
     private var safetyTimer: Timer?
@@ -133,16 +144,71 @@ final class PTTController {
         longPressTimer = nil
     }
 
-    private func beginPTT(reason: String) {
+    /// - Parameter hotKeyStillHeld: 用户按着的那个键**没有被吞**，此刻仍以按下状态
+    ///   躺在系统的事件流里（按住说话模式的全局热键就是这样）。这会改变发键方式：
+    ///   系统状态里它已经是按下的，再补一个 down 没有状态变化，输入法看不见。
+    private func beginPTT(reason: String, hotKeyStillHeld: Bool = false) {
         guard !isPTTActive else { return }
         isPTTActive = true
 
-        let key = Settings.shared.triggerShortcut
-        KeySynthesizer.press(key)
-        log("\(reason) → 按下 \(key.displayString)，开始说话")
-        onStateChange?(true)
+        // 顺序不能反：输入法非激活时会**直接忽略**触发键，而那一下没有任何补救
+        // 机会（不像修饰键还能重发）。必须先把它借过来，再发键。
+        var switched = false
+        if let targetID = Settings.shared.voiceInputMethodID {
+            switched = inputMethodSwitcher.borrow(targetID) == .switched
+        }
 
-        // 安全阀
+        let key = Settings.shared.triggerShortcut
+        // 用户按的键和要发给输入法的键是同一个，而且那一下没被吞——
+        // 也就是说这个键此刻在系统眼里已经是按下状态
+        let alreadyPhysicallyDown = hotKeyStillHeld && Settings.shared.hotKey == key
+
+        // 没换输入法 + 同一个键 + 没吞事件 = 输入法早就收到用户真按的那一下了，
+        // 我们再插一手只会把它已经开始的录音打断
+        if !switched, alreadyPhysicallyDown {
+            triggerKeyIsDown = false        // 不是我们发的，也就不该由我们释放
+            log("\(reason) → 输入法已直接收到 \(key.displayString)")
+            onStateChange?(true)
+            startSafetyTimer()
+            return
+        }
+
+        let sendPress: () -> Void = { [weak self] in
+            guard let self else { return }
+            if alreadyPhysicallyDown {
+                // 先 up 造出跳变，输入法才认得这是「刚按下」
+                KeySynthesizer.pressWithStateJump(key) { [weak self] in
+                    guard let self, self.isPTTActive else { return }
+                    self.triggerKeyIsDown = true
+                    self.log("按下 \(key.displayString)，开始说话")
+                }
+            } else {
+                KeySynthesizer.press(key)
+                self.triggerKeyIsDown = true
+                self.log("按下 \(key.displayString)，开始说话")
+            }
+        }
+
+        if switched {
+            // 刚切过去，得等它真正接管输入上下文，否则这一下会被静默丢掉
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.isPTTActive else { return }   // 期间可能已经松开
+                sendPress()
+            }
+            pendingPress = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + InputMethodSwitcher.readyDelay, execute: item)
+            log("\(reason) → 已切换输入法，等它就绪")
+        } else {
+            log("\(reason) → 开始说话")
+            sendPress()
+        }
+        onStateChange?(true)
+        startSafetyTimer()
+    }
+
+    /// 兜底：任何异常路径都不能让触发键/借来的输入法永久卡住
+    private func startSafetyTimer() {
+        safetyTimer?.invalidate()
         safetyTimer = Timer.scheduledTimer(withTimeInterval: Self.maxPTTDuration, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.endPTT(reason: "超时保护") }
         }
@@ -155,10 +221,72 @@ final class PTTController {
         safetyTimer?.invalidate()
         safetyTimer = nil
 
+        // 触发键可能还在「等输入法就绪」的队列里没发出去。必须连这条一起取消，
+        // 否则 release 先跑、press 后跑，键就永久卡在按下状态。
+        pendingPress?.cancel()
+        pendingPress = nil
+
         let key = Settings.shared.triggerShortcut
-        KeySynthesizer.release(key)
-        log("\(reason) → 释放 \(key.displayString)")
+        if triggerKeyIsDown {
+            KeySynthesizer.release(key)
+            triggerKeyIsDown = false
+            log("\(reason) → 释放 \(key.displayString)")
+        } else {
+            log("\(reason) → 结束（触发键尚未发出，无需释放）")
+        }
         onStateChange?(false)
+
+        // 不在这里立刻还：录音停止那一刻文字还没送进目标 App，而那条通道
+        // 依赖「它仍是当前输入法」。由 switcher 等识别真正结束再还。
+        inputMethodSwitcher.scheduleRestore()
+    }
+
+    // MARK: 全局快捷键
+
+    /// 键盘上的全局快捷键触发。
+    ///
+    /// 按住说话模式下**必须**走长按阈值，而且短按要把那一下还给系统。
+    /// 因为热键是靠吞掉原事件实现的，而 fn 这类键本身就有单击语义
+    /// （切换输入法 / Emoji / 听写）——不区分的话，用户会发现"单击 fn 换输入法
+    /// 突然失灵了"，而且完全联想不到是这个小工具干的。
+    ///
+    /// 线控那边的阈值区分的是「单击 = 播放/暂停」，这边区分的是「单击 = 系统功能」，
+    /// 语义一致，所以共用 `longPressThreshold`。
+    func handleHotKey(pressed: Bool) {
+        switch Settings.shared.triggerMode {
+        case .hold:
+            if pressed {
+                startHotKeyLongPress()
+            } else {
+                cancelHotKeyLongPress()
+                if isPTTActive {
+                    endPTT(reason: "快捷键松开")
+                }
+                // 短按不用管：这个模式下原始按键根本没被吞，系统自己会处理
+                // 它的单击行为（fn 换输入法等）。曾经试过「吞掉再补发」，
+                // 实测补发的 fn 不触发任何系统行为，那条路是死的。
+            }
+        case .toggle:
+            // 松开不做事；按下沿的重复已由 GlobalHotKey 挡掉。
+            // 这个模式下单击就是功能本身，没法再把它让给系统。
+            guard pressed else { return }
+            if isPTTActive { endPTT(reason: "快捷键再按一下") } else { beginPTT(reason: "快捷键按一下") }
+        }
+    }
+
+    private func startHotKeyLongPress() {
+        cancelHotKeyLongPress()
+        hotKeyLongPressTimer = Timer.scheduledTimer(
+            withTimeInterval: Settings.shared.longPressThreshold, repeats: false
+        ) { [weak self] _ in
+            // 按住说话模式不吞原始按键，所以此刻它仍以按下状态躺在事件流里
+            Task { @MainActor in self?.beginPTT(reason: "快捷键长按", hotKeyStillHeld: true) }
+        }
+    }
+
+    private func cancelHotKeyLongPress() {
+        hotKeyLongPressTimer?.invalidate()
+        hotKeyLongPressTimer = nil
     }
 
     // MARK: 兜底释放
@@ -169,10 +297,15 @@ final class PTTController {
     /// 设备断开 / 功能关闭 / app 退出时调用
     func forceRelease(reason: String) {
         cancelLongPressTimer()
+        cancelHotKeyLongPress()
         isButtonDown = false
         if isPTTActive {
             endPTT(reason: reason)
         }
+        // 借出去的输入法同样要还，而且这些路径不能再等麦克风——它们本身就是
+        // 「收不到正常结束事件」的出口，等下去很可能永远等不到。
+        // 借了不还 = 用户的输入法被永久改掉，正是这个功能最该避免的后果。
+        inputMethodSwitcher.restoreNow(reason: reason)
     }
 
     private func log(_ message: String) {

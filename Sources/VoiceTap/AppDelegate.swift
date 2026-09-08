@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let ptt = PTTController()
     private let diagnostics = DiagnosticsWindowController()
     private let nowPlayingGuard = NowPlayingGuard()
+    private let hotKey = GlobalHotKey()
     private let audioWatcher = AudioDeviceWatcher()
     private let settingsModel = SettingsViewModel()
     private lazy var settingsWindow = SettingsWindowController(model: settingsModel)
@@ -58,6 +59,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         nowPlayingGuard.onLog = { [weak self] message in self?.diagnostics.append(message) }
 
+        hotKey.onLog = { [weak self] message in self?.diagnostics.append(message) }
+        hotKey.onHotKey = { [weak self] pressed in
+            // 开关关掉时不响应。tap 撤除有延迟，中间那一拍可能还会进来
+            guard Settings.shared.enabled else { return }
+            self?.ptt.handleHotKey(pressed: pressed)
+        }
+        ptt.inputMethodSwitcher.onLog = { [weak self] message in self?.diagnostics.append(message) }
+
         // 上次若是崩溃退出的，修饰键可能还卡在按下状态，先清干净
         KeySynthesizer.clearModifiers()
 
@@ -92,6 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settingsModel.onNowPlayingSettingChanged = { [weak self] in
             self?.refreshNowPlayingGuard()
+        }
+        settingsModel.onHotKeySettingChanged = { [weak self] in
+            self?.refreshHotKey()
         }
         settingsModel.onAutoMicEnabled = { [weak self] in
             guard self?.isHeadsetConnected == true else { return }
@@ -225,6 +237,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // 退出前必须释放触发键，否则修饰键会永久卡在按下状态
         ptt.forceRelease(reason: "退出")
+        hotKey.stop()
         monitor.stop()
         nowPlayingGuard.stop()
         audioWatcher.stop()
@@ -363,7 +376,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let symbol = isHeadsetConnected ? "headphones" : "headphones.slash"
+        // 没耳机但键盘快捷键还能用时，headphones.slash 是误导——那表示「用不了」
+        let symbol: String
+        if isHeadsetConnected { symbol = "headphones" }
+        else if hotKeyUsable { symbol = "keyboard" }
+        else { symbol = "headphones.slash" }
         button.image = StatusIcon.make(base: symbol, badge: .sparkle)
         button.contentTintColor = nil
         button.toolTip = "VoiceTap — \(statusText)"
@@ -373,17 +390,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// 不能只说「未接入」：停用和缺权限时同样没法工作，
     /// 混为一谈会让人一直去查耳机而不是去查权限。
+    /// 键盘快捷键这条路通不通。它和耳机无关——没插耳机照样能按。
+    private var hotKeyUsable: Bool {
+        Settings.shared.enabled
+            && Settings.shared.hotKeyEnabled
+            && Permissions.inputMonitoring == .granted
+    }
+
     private var statusText: String {
         if let missing = missingPermissionNames { return "缺少\(missing)权限" }
         if !Settings.shared.enabled { return "已停用" }
-        return isHeadsetConnected ? "耳机已接入" : "耳机未接入"
+        if isHeadsetConnected { return "耳机已接入" }
+        // 有键盘快捷键就不是「不可用」状态，别再报耳机
+        return hotKeyUsable ? "按 \(Settings.shared.hotKey.displayString) 说话" : "耳机未接入"
     }
 
     /// 菜单首行。未接入时把操作提示并进同一行，不另起一行说同一件事。
     private var menuStatusText: String {
         if let missing = missingPermissionNames { return "缺少\(missing)权限，功能无法使用" }
         if !Settings.shared.enabled { return "已停用" }
-        return isHeadsetConnected ? "耳机已接入" : "耳机未接入，插上即可使用"
+        if isHeadsetConnected { return "耳机已接入" }
+        return hotKeyUsable
+            ? "按 \(Settings.shared.hotKey.displayString) 说话（耳机未接入）"
+            : "耳机未接入，插上即可使用"
     }
 
     /// 缺哪几个权限。全齐返回 nil。
@@ -418,6 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             monitor.start(seize: Settings.shared.seizeDevice)
         }
         refreshNowPlayingGuard()
+        refreshHotKey()
     }
 
     /// 轮询那些没有可靠通知的外部状态：权限（系统不发通知）、
@@ -453,6 +483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             diagnostics.append("权限被撤销，功能已失效")
             ptt.forceRelease(reason: "权限撤销")
             refreshNowPlayingGuard()
+            refreshHotKey()
             presentWindow { self.settingsWindow.show(pane: .permissions) }
         }
     }
@@ -464,6 +495,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             monitor.start(seize: Settings.shared.seizeDevice)
         }
         refreshNowPlayingGuard()
+        refreshHotKey()
+    }
+
+    /// 全局快捷键的启停条件。
+    ///
+    /// 和 `refreshNowPlayingGuard` 同构：条件由几个独立的开关和外部状态共同决定，
+    /// 任何一个变了都要重新过一遍这里，否则状态会停在上一次的结论上。
+    ///
+    /// 权限只看「输入监控」——那是 `CGEvent.tapCreate` 的硬门槛，没有它监听
+    /// 根本建不起来。合成触发键还要「辅助功能」，但那条缺了至少日志里能看到
+    /// 按键收到了，比整个监听都起不来更好排查。
+    private func refreshHotKey() {
+        let wanted = Settings.shared.enabled
+            && Settings.shared.hotKeyEnabled
+            && Permissions.inputMonitoring == .granted
+        if wanted {
+            // 只有轻点切换需要吞事件的能力；按住说话用 listenOnly，
+            // 否则 .defaultTap 会连带废掉 fn 的系统单击行为
+            hotKey.start(shortcut: Settings.shared.hotKey,
+                         swallows: Settings.shared.triggerMode == .toggle)
+        } else {
+            hotKey.stop()
+        }
     }
 
     /// 抢占「正在播放」只在轻点切换下才有意义：按住说话不会让 `rcd` 发出
@@ -495,6 +549,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 走 model 而不是直接改 Settings：设置窗口开着时那个开关要跟着动，
         // 两处各改各的迟早出现「菜单说开着、设置里显示关着」
         settingsModel.enabled.toggle()
+    }
+
+    @objc private func selectVoiceInputMethod(_ sender: NSMenuItem) {
+        // 走 ViewModel 而不是直接写 Settings：它的 didSet 会先把可能正借着的
+        // 输入法还回去，再写新值。顺序反了，用户原来的输入法就再也回不来。
+        settingsModel.voiceInputMethodID = sender.representedObject as? String ?? ""
     }
 
     @objc private func selectTriggerMode(_ sender: NSMenuItem) {
@@ -637,6 +697,41 @@ extension AppDelegate: NSMenuDelegate {
         enabledItem.target = self
         enabledItem.state = Settings.shared.enabled ? .on : .off
         menu.addItem(enabledItem)
+
+        // 语音输入法和触发方式同属「会随场景换」的那一类（想用哪家的识别就切哪家），
+        // 所以同样给一个子菜单，不埋进设置窗口。
+        let voiceMethods = InputMethodCatalog.voiceInputMethods()
+        if !voiceMethods.isEmpty {
+            let currentID = Settings.shared.voiceInputMethodID
+            let currentName = currentID.flatMap { id in voiceMethods.first { $0.id == id }?.name }
+            let imeItem = NSMenuItem(title: "语音输入法：\(currentName ?? "不指定")",
+                                     action: nil, keyEquivalent: "")
+            let imeMenu = NSMenu()
+
+            let noneItem = NSMenuItem(title: "不指定（只对当前输入法发触发键）",
+                                      action: #selector(selectVoiceInputMethod(_:)), keyEquivalent: "")
+            noneItem.target = self
+            noneItem.representedObject = ""
+            noneItem.state = (currentID == nil) ? .on : .off
+            imeMenu.addItem(noneItem)
+            imeMenu.addItem(.separator())
+
+            for ime in voiceMethods {
+                let item = NSMenuItem(title: ime.name,
+                                      action: #selector(selectVoiceInputMethod(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = ime.id
+                item.state = (ime.id == currentID) ? .on : .off
+                imeMenu.addItem(item)
+            }
+            imeItem.submenu = imeMenu
+            menu.addItem(imeItem)
+
+            // 选了输入法却没开全局快捷键，等于只有插耳机时能用，容易以为是坏的
+            if currentID != nil, !Settings.shared.hotKeyEnabled {
+                menu.addItem(disabledItem("　未开启键盘快捷键，仅耳机线控可触发"))
+            }
+        }
 
         // 触发方式放菜单里：它是会随场景换的东西（安静场合按住说话，
         // 长段口述切成按一下），埋在设置窗口里够不着。

@@ -23,6 +23,18 @@ struct Shortcut: Codable, Equatable {
 
     var isEmpty: Bool { keyCode == nil && modifiers == 0 }
 
+    /// 拿它当**全局热键**会不会误伤普通打字。
+    ///
+    /// 全局热键是靠吞掉事件实现的（不吞的话输入法会在切换前就收到那一下）。
+    /// 单独一个 ⌘ / ⇧ / ⌃ / ⌥ 被吞掉，等于系统再也看不到这个修饰键被按下，
+    /// ⌘C、⌘V 这类组合键会整个失效——而且失效时毫无线索。
+    ///
+    /// fn 不在此列：以它开头的组合键极少，且语音输入法本来就占用着它。
+    var isRiskyAsHotKey: Bool {
+        guard isModifierOnly, modifiers != 0 else { return false }
+        return modifiers != CGEventFlags.maskSecondaryFn.rawValue
+    }
+
     // MARK: 显示
 
     /// 形如 "fn"、"⌃⌥⌘Z"、"⌥空格"

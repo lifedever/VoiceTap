@@ -19,7 +19,7 @@ private struct GeneralPane: View {
                 }
                 .toggleStyle(.switch)
 
-                Text("关闭后不再响应耳机线控，其余设置保留。")
+                Text("关闭后不再响应任何触发，设置保留。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -51,7 +51,7 @@ private struct GeneralPane: View {
                 .toggleStyle(.switch)
 
                 HStack {
-                    Text("有新版本时提示你，确认后自动装好重启。")
+                    Text("有新版本时提示，确认后自动安装。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -64,29 +64,73 @@ private struct GeneralPane: View {
     }
 }
 
-// MARK: - 触发键
+// MARK: - 语音输入法
 
-private struct TriggerPane: View {
+private struct VoiceInputPane: View {
     @ObservedObject var model: SettingsViewModel
-
-    private var triggerModeHint: String {
-        switch model.triggerMode {
-        case .hold:
-            "按住线控中键说话，松开出字。手离开按钮就一定会结束。"
-        case .toggle:
-            "轻点一下开始说话，手可以离开耳机，再轻点一下才结束。"
-            + "说话时状态栏图标变成波形，点它可以立刻结束；"
-            + "点鼠标或切到别的 App 也会自动结束，忘了关的话 2 分钟后兜底。"
-        }
-    }
 
     var body: some View {
         Form {
             Section {
+                if model.voiceInputMethods.isEmpty {
+                    Label("没找到带语音输入的输入法", systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                } else {
+                    Picker("语音输入法", selection: Binding(
+                        get: { model.voiceInputMethodID },
+                        set: { model.voiceInputMethodID = $0 }
+                    )) {
+                        Text("不指定").tag("")
+                        ForEach(model.voiceInputMethods) { ime in
+                            Text(ime.name).tag(ime.id)
+                        }
+                    }
+
+                    Text("说话时临时切到它，说完自动切回。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.selectedInputMethodMissing {
+                    Label("原先选的输入法已不存在，请重新选择",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            // 两个快捷键必须放在一起看，否则分居两页时只看到两个一模一样的录制框，
+            // 根本分不出谁是谁
+            Section("快捷键") {
+                Toggle(isOn: Binding(
+                    get: { model.hotKeyEnabled },
+                    set: { model.hotKeyEnabled = $0 }
+                )) {
+                    Text("用键盘快捷键触发")
+                }
+                .toggleStyle(.switch)
+
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("触发键")
-                        Text("说话期间按住的快捷键")
+                        Text("你按的键")
+                        Text("在任何 App 里按它说话，不用插耳机")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    ShortcutRecorder(shortcut: Binding(
+                        get: { model.hotKey },
+                        set: { model.hotKey = $0 }
+                    ))
+                    .frame(width: 150, height: 26)
+                }
+                .disabled(!model.hotKeyEnabled)
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("发给输入法的键")
+                        Text("需与输入法里设的语音快捷键一致")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -95,13 +139,23 @@ private struct TriggerPane: View {
                         get: { model.triggerShortcut },
                         set: { model.triggerShortcut = $0 }
                     ))
-                    .frame(width: 160, height: 26)
+                    .frame(width: 150, height: 26)
                 }
 
-                Text("把它设成和输入法「按住说话」相同的快捷键即可联动。"
-                     + "VoiceTap 只负责按下这个键，谁监听它谁响应，因此不限于某一款输入法。")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                // 这两条是真会出事的，留着
+                if model.hotKeyEnabled, model.hotKey.isRiskyAsHotKey {
+                    Label("单独用「\(model.hotKey.displayString)」会让它的组合键失效（如 ⌘C），建议改用 fn",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+
+                if model.hotKeyEnabled, model.inputMonitoring != .granted {
+                    Label("缺少「输入监控」权限，按下不会有反应",
+                          systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section {
@@ -115,21 +169,23 @@ private struct TriggerPane: View {
                 }
                 .pickerStyle(.radioGroup)
 
-                Text(triggerModeHint)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-
                 if model.triggerMode == .toggle, !model.preemptNowPlaying {
-                    Label("轻点会被系统当成播放键，唤起音乐 App 并抢走输入焦点。"
-                          + "打开下面的「抢占正在播放」才能挡住。",
+                    Label("轻点会被当成播放键唤起音乐 App，需在「耳机线控」里打开「抢占正在播放」",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
                 }
-            }
 
-            if model.triggerMode == .hold {
-                Section {
+                // 这个模式必须吞掉按键（单击就是功能本身），系统的单击行为救不回来
+                if model.triggerMode == .toggle, model.hotKeyEnabled {
+                    Label("这个模式会占用「\(model.hotKey.displayString)」的单击，"
+                          + "系统的单点换输入法会失效；按住说话模式不受影响",
+                          systemImage: "info.circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.triggerMode == .hold {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("按住阈值")
@@ -143,32 +199,30 @@ private struct TriggerPane: View {
                             set: { model.longPressThreshold = $0 }
                         ), in: 0.15...1.0)
                     }
-
-                    Text("按住超过这个时长才算长按；短于它算单击。")
+                    Text("线控按住超过这个时长算长按，短于算单击。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
             }
+        }
+        .formStyle(.grouped)
+        .frame(width: paneWidth)
+    }
+}
 
-            if model.triggerMode == .toggle {
-                Section {
-                    Toggle(isOn: Binding(
-                        get: { model.preemptNowPlaying },
-                        set: { model.preemptNowPlaying = $0 }
-                    )) {
-                        Text("抢占系统的「正在播放」")
-                    }
-                    .toggleStyle(.switch)
+// MARK: - 耳机线控
 
-                    Text("把 VoiceTap 注册成当前播放器，线控的播放命令就会落到它手里，"
-                         + "系统不再启动音乐 App。这是轻点切换唯一能挡住它的办法，"
-                         + "别关。只在有线耳机接入期间生效，拔掉就交还。"
-                         + "代价：接入期间控制中心会显示 VoiceTap 在播放，"
-                         + "键盘上的播放键也会失效——命令同样只发到 VoiceTap。"
-                         + "介意的话改用「按住说话」，那个模式不需要这个开关。")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
+private struct HeadsetPane: View {
+    @ObservedObject var model: SettingsViewModel
+
+    var body: some View {
+        Form {
+            Section {
+                Text(model.triggerMode == .hold
+                     ? "按住线控中键说话，松开出字。"
+                     : "轻点线控中键开始，再轻点结束。点状态栏图标也能结束，2 分钟自动兜底。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -190,13 +244,27 @@ private struct TriggerPane: View {
                 .disabled(!model.seizeDevice || model.triggerMode.keepsRecordingAfterRelease)
 
                 if model.triggerMode.keepsRecordingAfterRelease {
-                    Text("切换模式下中键用来开始/结束说话，播放控制补不回来；音量键不受影响。")
+                    Text("切换模式下中键已被占用，播放控制补不回来。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
 
-                Text("独占后按键不再传给系统，长按说话时不会误暂停音乐；"
-                     + "播放和音量控制由 VoiceTap 合成补回。")
+                Text("按键不再传给系统，播放和音量由 VoiceTap 补回。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle(isOn: Binding(
+                    get: { model.preemptNowPlaying },
+                    set: { model.preemptNowPlaying = $0 }
+                )) {
+                    Text("抢占系统的「正在播放」")
+                }
+                .toggleStyle(.switch)
+
+                Text("挡住线控唤起音乐 App，轻点切换必须开。"
+                     + "代价：耳机接入期间键盘播放键会失效。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -437,7 +505,7 @@ private struct ShortcutRecorder: NSViewRepresentable {
 final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     enum Pane: Int {
-        case general, trigger, microphone, permissions, about
+        case general, voiceInput, headset, microphone, permissions, about
     }
 
     let model: SettingsViewModel
@@ -465,22 +533,24 @@ final class SettingsWindowController: NSObject, NSWindowDelegate {
 
     private func build() {
         let general = NSHostingController(rootView: GeneralPane(model: model))
-        let trigger = NSHostingController(rootView: TriggerPane(model: model))
+        let voiceInput = NSHostingController(rootView: VoiceInputPane(model: model))
+        let headset = NSHostingController(rootView: HeadsetPane(model: model))
         let microphone = NSHostingController(rootView: MicrophonePane(model: model))
         let permissions = NSHostingController(rootView: PermissionsPane(model: model))
         let about = NSHostingController(rootView: AboutPane())
 
-        let controllers: [NSViewController] = [general, trigger, microphone, permissions, about]
+        let controllers: [NSViewController] = [general, voiceInput, headset, microphone, permissions, about]
         // 让 preferredContentSize 跟随 SwiftUI 内容：NSTabViewController
         // 切 tab 时按它做窗口尺寸动画
         general.sizingOptions = [.preferredContentSize]
-        trigger.sizingOptions = [.preferredContentSize]
+        voiceInput.sizingOptions = [.preferredContentSize]
+        headset.sizingOptions = [.preferredContentSize]
         microphone.sizingOptions = [.preferredContentSize]
         permissions.sizingOptions = [.preferredContentSize]
         about.sizingOptions = [.preferredContentSize]
 
-        let titles = ["通用", "触发键", "麦克风", "权限", "关于"]
-        let symbols = ["gearshape", "command", "mic", "lock.shield", "info.circle"]
+        let titles = ["通用", "语音输入", "耳机线控", "麦克风", "权限", "关于"]
+        let symbols = ["gearshape", "waveform", "headphones", "mic", "lock.shield", "info.circle"]
 
         let tabs = NSTabViewController()
         tabs.tabStyle = .toolbar
