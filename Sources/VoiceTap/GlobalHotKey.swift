@@ -35,23 +35,25 @@ private func globalHotKeyTapCallback(
 /// 监听一个全局快捷键，在任何 App 里按下都能触发语音输入。
 ///
 /// fn 走 `flagsChanged`，`NSEvent` 那条路一条都收不到（约束 7），所以只能挂
-/// EventTap。层的选择见下——两种模式挂的层和类型都不同。
+/// EventTap。
 ///
-/// ## 两种模式挂的是不同类型的 tap
+/// ## 吞不吞是每次现算的
 ///
-/// - **按住说话** → Session 层 + `.listenOnly`。这个模式不需要吞事件，用最轻的
-///   方式旁观即可，也最不容易误伤别的键。
-///   原始按键放行之后，短按由系统照常处理；长按则借用输入法，再用
-///   `KeySynthesizer.pressWithStateJump` 制造一次它能看见的「刚按下」。
+/// tap 固定建在 HID 层 `.defaultTap`（输入法自己的 tap 也在这一层且更早注册，
+/// 站不到它前面就截不住），但是否真的吞掉逐次判断，见 `shouldSwallow`：
 ///
-/// - **轻点切换** → `.defaultTap`，必须吞。那个模式里单击就是功能本身，
-///   放行的话按一下会同时触发系统行为和语音输入。代价就是这个模式下
-///   热键的系统单击行为救不回来（合成的按键触发不了它）。
+/// - **当前输入法 == 目标** → 放行。它自己会响应，我们不插手；这样那个键
+///   原本的系统行为（单点换输入法等）也保住了。长按时无需合成任何东西。
+/// - **当前输入法 != 目标** → 吞掉，抢在它前面。否则当前输入法会先响应，
+///   于是「选了豆包，按 fn 弹出来的却是微信输入法」。吞掉之后借用目标输入法，
+///   再合成触发键发给它。
+/// - **轻点切换** → 一律吞：那个模式里单击就是功能本身。
 @MainActor
 final class GlobalHotKey {
 
-    /// 按下 / 松开热键。松开只在「按住说话」模式下有意义。
-    var onHotKey: ((Bool) -> Void)?
+    /// 按下 / 松开热键。第二个参数是这一下有没有被我们吞掉——
+    /// 吞了的话那个键在系统眼里并没有被按下，PTT 发键的方式要跟着变。
+    var onHotKey: ((Bool, Bool) -> Void)?
     var onLog: ((String) -> Void)?
 
     private(set) var isRunning = false
@@ -60,43 +62,55 @@ final class GlobalHotKey {
     private var runLoopSource: CFRunLoopSource?
 
     private var shortcut: Shortcut = .fnOnly
-    /// tap 是不是以「可吞事件」的方式建的。**只有轻点切换模式才是真**——
-    /// 那个模式里单击就是功能本身，不吞的话按一下会同时触发系统行为和语音输入。
-    /// 按住说话模式用 listenOnly，见 `start(shortcut:swallows:)` 的说明。
-    private var swallowsEvents = false
+    /// tap 建成了「有能力吞事件」的类型吗。真正吞不吞每次现算，见 `shouldSwallow`。
+    private var canSwallow = false
+
+    /// 这一下要不要吞掉。
+    ///
+    /// 关键在于**当前输入法自己可能也在抢这个键**：微信输入法的「按住说话」就是
+    /// fn，而且它的 tap 在 HID 层、比我们先注册。放行的话它会在我们之前就开始
+    /// 录音——于是「选了豆包，按 fn 却弹出微信输入法」。
+    ///
+    /// 所以按当前输入法分两种：
+    /// - **当前就是目标输入法** → 放行。它自己会响应，我们不必插手；
+    ///   而且放行才能保住这个键原本的系统行为（单点换输入法等）。
+    /// - **当前不是目标** → 吞掉。必须抢在当前输入法前面把这一下截住，
+    ///   否则它先响应，我们借谁都没用。
+    ///
+    /// 轻点切换模式一律吞：那个模式里单击就是功能本身。
+    private var shouldSwallow: Bool {
+        guard canSwallow else { return false }
+        if Settings.shared.triggerMode == .toggle { return true }
+        guard let target = Settings.shared.voiceInputMethodID else { return false }
+        return InputMethodCatalog.currentID() != target
+    }
     /// 热键正被按着。纯修饰键的 flagsChanged 只报「现在有哪些修饰键」，
     /// 不报是哪一个变了，得自己记住上一拍的状态才能分出按下沿和抬起沿。
     private var isDown = false
 
     // MARK: 生命周期
 
-    /// - Parameter swallows: 要不要具备**吞掉事件**的能力。
-    ///
-    ///   按住说话模式本来就不需要吞，所以给它 `.listenOnly` + Session 层，
-    ///   按「最小干预」原则取的保守值。
-    func start(shortcut: Shortcut, swallows: Bool) {
+    /// tap 一律建在 HID 层、且具备吞事件的能力——因为目标输入法自己的 tap
+    /// 也在 HID 层，我们必须能抢在它前面。**真正吞不吞每次现算**（`shouldSwallow`），
+    /// 不需要吞的时候原样放行，那个键的系统行为就还在。
+    func start(shortcut: Shortcut) {
         stop()
         guard !shortcut.isEmpty else {
             log("全局快捷键未设置，不启动监听")
             return
         }
         self.shortcut = shortcut
-        self.swallowsEvents = swallows
 
         let mask = (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
 
-        // 按「最小干预」选层，不是因为它修好过什么（曾经误以为 HID 层的
-        // defaultTap 会废掉 fn 的系统行为，后来发现 VoiceTap 完全退出时同样复现，
-        // 那条结论未证实、已撤销）：
-        //   .cgSessionEventTap 看得到 fn 却吞不掉它的系统行为（约束 7 记的那个
-        //     「缺点」），对只想旁观的按住说话模式正好，也最不容易误伤别的键。
-        // 只有必须吞事件的轻点切换才回到 HID 层。
+        // 必须是 HID 层 + headInsert：输入法自己的 tap 也挂在 HID 层且更早注册，
+        // 只有站在它前面才可能截住那一下。Session 层来不及——那时它已经响应了。
         guard let tap = CGEvent.tapCreate(
-            tap: swallows ? .cghidEventTap : .cgSessionEventTap,
+            tap: .cghidEventTap,
             place: .headInsertEventTap,
-            options: swallows ? .defaultTap : .listenOnly,
+            options: .defaultTap,
             eventsOfInterest: CGEventMask(mask),
             callback: globalHotKeyTapCallback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
@@ -106,6 +120,7 @@ final class GlobalHotKey {
             return
         }
 
+        canSwallow = true
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
@@ -126,6 +141,7 @@ final class GlobalHotKey {
         runLoopSource = nil
         isDown = false
         isRunning = false
+        canSwallow = false
     }
 
     nonisolated func reenableTap() {
@@ -154,23 +170,26 @@ final class GlobalHotKey {
             let nowDown = normalized == shortcut.modifiers
             guard nowDown != isDown else { return false }   // 状态没变，别重复上报
             isDown = nowDown
-            dispatch(nowDown)
-            return swallowsEvents
+            let swallow = shouldSwallow
+            dispatch(nowDown, swallowed: swallow)
+            return swallow
         }
 
         // 修饰键 + 主键
         guard keyCode == shortcut.keyCode, normalized == shortcut.modifiers else { return false }
         switch type {
         case .keyDown:
-            guard !isDown else { return swallowsEvents }   // 系统的按键重复，不重复上报
+            guard !isDown else { return shouldSwallow }   // 系统的按键重复，不重复上报
             isDown = true
-            dispatch(true)
-            return swallowsEvents
+            let downSwallow = shouldSwallow
+            dispatch(true, swallowed: downSwallow)
+            return downSwallow
         case .keyUp:
             guard isDown else { return false }
             isDown = false
-            dispatch(false)
-            return swallowsEvents
+            let upSwallow = shouldSwallow
+            dispatch(false, swallowed: upSwallow)
+            return upSwallow
         default:
             return false
         }
@@ -187,10 +206,10 @@ final class GlobalHotKey {
     ///
     /// 这里已经在主线程（tap 挂在主 runloop 上），`async` 只是把动作推到当前
     /// 回调返回之后执行；派发顺序仍由主队列保证，按下一定排在松开前面。
-    private func dispatch(_ pressed: Bool) {
-        log("全局快捷键 \(shortcut.displayString) \(pressed ? "按下" : "松开")")
+    private func dispatch(_ pressed: Bool, swallowed: Bool) {
+        log("全局快捷键 \(shortcut.displayString) \(pressed ? "按下" : "松开")\(swallowed ? "（已截住）" : "")")
         DispatchQueue.main.async { [weak self] in
-            self?.onHotKey?(pressed)
+            self?.onHotKey?(pressed, swallowed)
         }
     }
 

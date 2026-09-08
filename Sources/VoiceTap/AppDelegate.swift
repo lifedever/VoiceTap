@@ -60,10 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         nowPlayingGuard.onLog = { [weak self] message in self?.diagnostics.append(message) }
 
         hotKey.onLog = { [weak self] message in self?.diagnostics.append(message) }
-        hotKey.onHotKey = { [weak self] pressed in
+        hotKey.onHotKey = { [weak self] pressed, swallowed in
             // 开关关掉时不响应。tap 撤除有延迟，中间那一拍可能还会进来
             guard Settings.shared.enabled else { return }
-            self?.ptt.handleHotKey(pressed: pressed)
+            self?.ptt.handleHotKey(pressed: pressed, swallowed: swallowed)
         }
         ptt.inputMethodSwitcher.onLog = { [weak self] message in self?.diagnostics.append(message) }
 
@@ -511,10 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             && Settings.shared.hotKeyEnabled
             && Permissions.inputMonitoring == .granted
         if wanted {
-            // 只有轻点切换需要吞事件的能力；按住说话用 listenOnly，
-            // 否则 .defaultTap 会连带废掉 fn 的系统单击行为
-            hotKey.start(shortcut: Settings.shared.hotKey,
-                         swallows: Settings.shared.triggerMode == .toggle)
+            hotKey.start(shortcut: Settings.shared.hotKey)
         } else {
             hotKey.stop()
         }

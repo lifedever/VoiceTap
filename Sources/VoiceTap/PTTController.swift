@@ -252,11 +252,13 @@ final class PTTController {
     ///
     /// 线控那边的阈值区分的是「单击 = 播放/暂停」，这边区分的是「单击 = 系统功能」，
     /// 语义一致，所以共用 `longPressThreshold`。
-    func handleHotKey(pressed: Bool) {
+    /// - Parameter swallowed: 这一下被我们吞掉了吗。吞了的话它在系统眼里
+    ///   并没有被按下，合成触发键时就不需要「状态跳变」那套。
+    func handleHotKey(pressed: Bool, swallowed: Bool) {
         switch Settings.shared.triggerMode {
         case .hold:
             if pressed {
-                startHotKeyLongPress()
+                startHotKeyLongPress(swallowed: swallowed)
             } else {
                 cancelHotKeyLongPress()
                 if isPTTActive {
@@ -274,13 +276,15 @@ final class PTTController {
         }
     }
 
-    private func startHotKeyLongPress() {
+    private func startHotKeyLongPress(swallowed: Bool) {
         cancelHotKeyLongPress()
         hotKeyLongPressTimer = Timer.scheduledTimer(
             withTimeInterval: Settings.shared.longPressThreshold, repeats: false
         ) { [weak self] _ in
-            // 按住说话模式不吞原始按键，所以此刻它仍以按下状态躺在事件流里
-            Task { @MainActor in self?.beginPTT(reason: "快捷键长按", hotKeyStillHeld: true) }
+            // 没吞的话这个键此刻仍以按下状态躺在事件流里，发键方式要跟着变
+            Task { @MainActor in
+                self?.beginPTT(reason: "快捷键长按", hotKeyStillHeld: !swallowed)
+            }
         }
     }
 
