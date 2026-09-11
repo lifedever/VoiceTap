@@ -4,7 +4,8 @@ import Cocoa
 ///
 /// 语义（`Settings.triggerMode` 二选一）：
 ///   - 按住说话：长按中键 → 按住触发键（输入法开始录音），松开 → 释放触发键（出字）；
-///               单击中键 → 播放/暂停（独占模式下由我们合成补回）
+///               单击中键 → 播放/暂停（独占模式下由我们合成补回；
+///               开着「禁止线控唤起音乐 App」时补不回来，那一发会被自己截下）
 ///   - 切换：    轻点中键 → 按住触发键并保持，再轻点一下 → 释放。
 ///               单击已经被占用，这个模式下没有播放/暂停可补
 ///   - 音量键    → 两种模式相同，独占后都要合成补回，否则音量调节会失效
@@ -45,6 +46,10 @@ final class PTTController {
     var onStateChange: ((Bool) -> Void)?
     var onLog: ((String) -> Void)?
 
+    /// 「正在播放」位置是不是正被我们占着（由 `AppDelegate` 回读 `NowPlayingGuard`）。
+    /// 占着的时候，单击补的那一发播放键会被我们自己截下，见 `handleHold`。
+    var isNowPlayingPreempted: (() -> Bool)?
+
     // MARK: 输入
 
     func handle(button: HeadsetButton, pressed: Bool) {
@@ -84,8 +89,17 @@ final class PTTController {
             } else {
                 // 没到长按阈值 = 单击
                 if Settings.shared.seizeDevice && Settings.shared.singleClickPlayPause {
-                    KeySynthesizer.postPlayPause()
-                    log("单击 → 播放/暂停")
+                    // 抢占「正在播放」时这一发发出去也是白发：它会被我们自己的
+                    // NowPlayingGuard 截下——那边的判据是「刚有线控按键到达」，
+                    // 分不出这条命令是外面来的还是我们合成的，也不该分（见 handleCommand）。
+                    // 真发出去只会在事件监视器里留一条「已截下线控播放命令」，
+                    // 看着像是外部来的，排查时白绕一圈。
+                    if isNowPlayingPreempted?() == true {
+                        log("单击 → 播放/暂停已被「禁止线控唤起音乐 App」挡下")
+                    } else {
+                        KeySynthesizer.postPlayPause()
+                        log("单击 → 播放/暂停")
+                    }
                 }
             }
         }

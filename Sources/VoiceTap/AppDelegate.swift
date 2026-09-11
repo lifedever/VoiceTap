@@ -54,6 +54,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ptt.onLog = { [weak self] message in
             self?.diagnostics.append(message)
         }
+        // 回读 guard 的真实状态，不在 PTTController 里按配置重新推导一遍——
+        // 那份条件有四项，抄过去迟早和这边对不上
+        ptt.isNowPlayingPreempted = { [weak self] in self?.nowPlayingGuard.isRunning ?? false }
 
         monitor.delegate = self
 
@@ -92,9 +95,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 换触发键/触发方式时先把当前按着的那个释放掉，顺序不能反：
         // 用新键去 release 等于旧键永远卡在按下状态
+        // 这里不再顺手 refreshNowPlayingGuard()：抢占的条件里已经没有触发方式了
+        // （见 refreshNowPlayingGuard），留着只会让人以为它还跟着触发设置走。
         settingsModel.onTriggerChanged = { [weak self] reason in
             self?.ptt.forceRelease(reason: reason)
-            self?.refreshNowPlayingGuard()
         }
         settingsModel.onMonitorSettingChanged = { [weak self] in
             self?.restartMonitor()
@@ -517,20 +521,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// 抢占「正在播放」只在轻点切换下才有意义：按住说话不会让 `rcd` 发出
-    /// 播放命令（它只把短按当播放键），开着纯属白占控制中心的位置。
+    /// 抢占「正在播放」的启停。
     ///
-    /// 同理，线控短按只有在**有线耳机在场且权限齐备**时才可能到来、才值得截：
-    /// 没耳机就没有那一下；没「输入监控」就收不到 HID 事件，时间窗永远不满足，
-    /// 每条命令都返回失败，位置却一直占着。任一条不成立都要把位置交还——
-    /// 占着的代价（控制中心被占、键盘播放键失效）是实打实的。
+    /// **不看触发方式**。这里曾经有一条 `triggerMode == .toggle`，依据是「按住说话
+    /// 不会让 `rcd` 发出播放命令」——那句话只覆盖了「按住」那一种按法。用户在按住
+    /// 说话模式下**单击**线控（误触，或想暂停音乐），`rcd` 照样把它当播放键。
+    /// 实测日志（hold 模式、开关开着、一次单击）：
     ///
-    /// 所以除了三个开关，每次耳机插拔（`handleHeadsetPlugChange`）和
+    /// ```
+    /// Request:  TogglePlayPause  SenderDevice = <>     ← rcd 直接读 HID 线控
+    /// Request:  TogglePlayPause  SenderDevice = <Mac>  ← 我们补的那一发「单击 = 播放/暂停」
+    /// Response: … 【 com.apple.Music (3403) ❯ Music 】  ← 两条都解析到 Music，每次新 PID
+    /// ```
+    ///
+    /// 于是那个开关在按住说话模式下是个**死开关**：设置里开着、菜单里打着勾，
+    /// 行为纹丝不动。指纹是「配置看着完全正确，行为却像没开」。
+    ///
+    /// 剩下的条件都是「值不值得占」这一类：线控短按只有在**有线耳机在场且权限齐备**
+    /// 时才可能到来。没耳机就没有那一下；没「输入监控」就收不到 HID 事件，
+    /// `NowPlayingGuard` 的时间窗判据永远不满足，每条命令都返回失败、位置却一直占着。
+    /// 任一条不成立都要交还——占着的代价（控制中心被占、播放键失效）是实打实的。
+    ///
+    /// 所以两个开关、耳机插拔（`handleHeadsetPlugChange`）、
     /// 权限变化（`handlePermissionChange`）都要重新过一遍这里。
     private func refreshNowPlayingGuard() {
         let wanted = Settings.shared.enabled
             && Settings.shared.preemptNowPlaying
-            && Settings.shared.triggerMode == .toggle
             && headsetPresent
             && Permissions.allGranted
         if wanted {
@@ -561,6 +577,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 走 model 而不是直接改 Settings：设置窗口开着时那个单选要跟着动，
         // 而且它的 didSet 会先把正按着的触发键释放掉
         settingsModel.triggerMode = mode
+    }
+
+    @objc private func togglePreemptNowPlaying(_ sender: NSMenuItem) {
+        // 走 model：设置窗口里是同一个开关，两处各改各的迟早对不上；
+        // 它的 didSet 还会把 refreshNowPlayingGuard 带起来
+        settingsModel.preemptNowPlaying.toggle()
     }
 
     @objc private func openSettings(_ sender: NSMenuItem) {
@@ -749,6 +771,22 @@ extension AppDelegate: NSMenuDelegate {
 
         menu.addItem(disabledItem("触发键：\(Settings.shared.triggerShortcut.displayString)"))
 
+        // 线控短按会被 rcd 当成播放键派发出去，把音乐 App 拉起来抢焦点——
+        // 独占线控拦不住它（见 NowPlayingGuard），只能靠抢占「正在播放」位置。
+        // 这是会随场景开关的东西（在听歌时想留着播放键，专心口述时想禁掉），
+        // 所以和触发方式一样摆在菜单里，不埋进设置窗口。
+        let preemptItem = NSMenuItem(title: "禁止线控唤起音乐 App",
+                                     action: #selector(togglePreemptNowPlaying(_:)), keyEquivalent: "")
+        preemptItem.target = self
+        preemptItem.state = Settings.shared.preemptNowPlaying ? .on : .off
+        menu.addItem(preemptItem)
+
+        // 按真实状态提示，不按配置推导：开关开着但没插耳机时抢占并没有启动，
+        // 那时说「播放键失效」是假警报。
+        if nowPlayingGuard.isRunning {
+            menu.addItem(disabledItem("　线控和键盘的播放键此期间失效"))
+        }
+
         // 缺权限时才在菜单里露出入口。这是异常状态，值得占一行；
         // 都授权了就不必——设置窗口里有完整的权限页。
         if let missing = missingPermissionNames {
@@ -779,6 +817,26 @@ extension AppDelegate: NSMenuDelegate {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+}
+
+// MARK: - 菜单项可用性
+
+extension AppDelegate: NSMenuItemValidation {
+
+    /// 「禁止线控唤起音乐 App」只在耳机接入时可点：没插耳机就不会有线控短按，
+    /// 抢占那时也不会启动（见 `refreshNowPlayingGuard`），让它可点等于允许改一个
+    /// 当下毫无效果的设置。
+    ///
+    /// 必须走这个协议，**不能**只设 `item.isEnabled = false`：`NSMenu.autoenablesItems`
+    /// 默认为真，带 target/action 的 item 在菜单显示前会被自动重算成可用，
+    /// 直接写的 isEnabled 会被静默覆盖掉（上面那些 `disabledItem` 之所以能灰，
+    /// 靠的是 action 为 nil，不是那一行赋值）。
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(togglePreemptNowPlaying(_:)) {
+            return isHeadsetConnected
+        }
+        return true
     }
 }
 

@@ -117,10 +117,14 @@ final class Settings {
     }
 
     /// 抢占系统的「正在播放」位置，截下线控的播放命令。
+    /// UI 上叫「禁止线控唤起音乐 App」——那才是用户感知到的事。
     ///
-    /// 默认**开**：轻点切换没有别的保护手段了（「按住片刻」那条路已证伪），
-    /// 关掉它这个模式必然被音乐 App 抢焦点、等于不可用。
-    /// 不想要它那些副作用的话，该换的是触发方式而不是这个开关。
+    /// 默认**开**：这是唯一能挡住音乐 App 被拉起来抢焦点的手段（独占线控拦不住
+    /// `rcd`，三条更轻的路都已证伪，见 `NowPlayingGuard`），关着就等于随时可能
+    /// 说到一半被抢走焦点。
+    ///
+    /// **和触发方式无关**。曾经只在轻点切换下才真的抢占，于是按住说话模式下这个
+    /// 开关是死的（设置里开着、行为纹丝不动）——见 `AppDelegate.refreshNowPlayingGuard`。
     var preemptNowPlaying: Bool {
         get { defaults.bool(forKey: Key.preemptNowPlaying) }
         set { defaults.set(newValue, forKey: Key.preemptNowPlaying) }

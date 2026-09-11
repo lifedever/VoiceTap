@@ -47,8 +47,8 @@ It also handles a third problem: making sure the recording actually goes through
 - **Pick your voice IME** — choose from the input methods installed on your Mac (WeType, Doubao, …). Press the hotkey to talk through it; your own input method is restored the moment it finishes. The list is discovered at runtime, so an IME you install later shows up on its own.
 - **Global hotkey** — works in any app, with no headset plugged in.
 - **Hold to talk** — hold the center button, speak, release. The text lands wherever your cursor is.
-- **Single click still works** — play/pause is synthesized back, so you do not lose media control.
-- **Volume buttons still work** — same story.
+- **A single click no longer wakes Music** — macOS treats a click on the remote as a play key and launches Music, stealing focus mid-sentence. VoiceTap catches that command instead. On by default; turn it off from the menu when you actually want to play something.
+- **Volume buttons still work** — synthesized back after VoiceTap takes over the remote.
 - **Microphone routing** — see which input device is active, switch it from the menu, and optionally auto-switch to the headset mic when you plug in.
 - **Warns when the mic is wrong** — headset plugged in but recording through the built-in mic is easy to miss; VoiceTap points it out.
 - **Live event monitor** — see exactly which HID events arrive and what gets synthesized. Makes "nothing happened" debuggable.

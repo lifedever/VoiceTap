@@ -169,8 +169,10 @@ private struct VoiceInputPane: View {
                 }
                 .pickerStyle(.radioGroup)
 
-                if model.triggerMode == .toggle, !model.preemptNowPlaying {
-                    Label("轻点会被当成播放键唤起音乐 App，需在「耳机线控」里打开「抢占正在播放」",
+                // 两种模式都会撞上：轻点切换是每次开始/结束都撞，按住说话是
+                // 单击（误触、或想暂停音乐）时撞。所以这里不再按模式区分。
+                if !model.preemptNowPlaying {
+                    Label("单击线控会被当成播放键唤起音乐 App，需在「耳机线控」里打开「禁止线控唤起音乐 App」",
                           systemImage: "exclamationmark.triangle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.orange)
@@ -241,10 +243,18 @@ private struct HeadsetPane: View {
                     Text("单击线控 = 播放/暂停")
                 }
                 .toggleStyle(.switch)
-                .disabled(!model.seizeDevice || model.triggerMode.keepsRecordingAfterRelease)
+                .disabled(!model.seizeDevice
+                          || model.triggerMode.keepsRecordingAfterRelease
+                          || model.preemptNowPlaying)
 
                 if model.triggerMode.keepsRecordingAfterRelease {
                     Text("切换模式下中键已被占用，播放控制补不回来。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                } else if model.preemptNowPlaying {
+                    // 不说的话表现是「开关明明开着，按线控却不播放」，
+                    // 而这两项隔着一个 Section，用户很难自己连上因果
+                    Text("「禁止线控唤起音乐 App」开着时，补回去的这一发会被一并挡下。")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -259,12 +269,15 @@ private struct HeadsetPane: View {
                     get: { model.preemptNowPlaying },
                     set: { model.preemptNowPlaying = $0 }
                 )) {
-                    Text("抢占系统的「正在播放」")
+                    Text("禁止线控唤起音乐 App")
                 }
                 .toggleStyle(.switch)
 
-                Text("挡住线控唤起音乐 App，轻点切换必须开。"
-                     + "代价：耳机接入期间键盘播放键会失效。")
+                // 和状态栏菜单里那一项是同一个开关，名字必须一字不差，
+                // 否则会被当成两个互不相干的设置
+                Text("单击线控会被系统当成播放键，把「音乐」拉起来抢走焦点，独占线控也拦不住。"
+                     + "打开后由 VoiceTap 接住这条命令。"
+                     + "代价：耳机接入期间线控和键盘的播放键都会失效。")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }

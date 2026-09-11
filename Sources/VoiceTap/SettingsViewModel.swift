@@ -43,8 +43,12 @@ final class SettingsViewModel: ObservableObject {
     ///
     /// 这里的写入顺序和 `triggerShortcut` **相反**，别照抄那边：
     /// 换触发方式不改触发键，`forceRelease` 用的还是同一个键，没有「必须用旧值释放」
-    /// 的问题；而回调里要按**新**模式决定抢占开关等一堆东西，先回调后写等于让它们
-    /// 全读到旧值——判断会整个反过来（切去按住模式反而保持抢占、切回轻点反而关掉）。
+    /// 的问题；而下面的 `onHotKeySettingChanged` 要按**新**模式决定建哪一种 tap，
+    /// 先回调后写等于让它读到旧值，建出来的 tap 和当前模式对不上。
+    ///
+    /// 踩过的那次是抢占开关（当时它还跟着触发方式走）：顺序写反后判断整个反过来，
+    /// 切去按住模式反而保持抢占、切回轻点反倒关掉，「轻点又唤起音乐 App」时隐时现。
+    /// 抢占现在不看模式了，但那个指纹照旧——**切换某个设置后，另一个联动行为反向**。
     @Published var triggerMode: TriggerMode {
         didSet {
             Settings.shared.triggerMode = triggerMode

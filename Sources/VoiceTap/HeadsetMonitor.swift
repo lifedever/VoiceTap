@@ -62,9 +62,12 @@ private func voicetapInputValueCallback(
 
     let pressed = IOHIDValueGetIntegerValue(value) == 1
 
-    // 时间戳必须在这里记，不能等到 delegate 里：MediaKeyBlocker 靠「HID 先到」
+    // 时间戳必须在这里记，不能等到 delegate 里：NowPlayingGuard 靠「HID 先到」
     // 这个顺序来区分线控和键盘上的播放键，下面那一跳 main.async 的排队延迟
     // 足以把顺序反过来。
+    //
+    // 也不能按 triggerMode 分支：两种触发方式下线控短按都要能被认出来，
+    // 漏了的话 handleCommand 会把它当成键盘来的、返回 commandFailed。
     if button == .playPause, pressed {
         MediaKeySignal.shared.notePlay()
     }
