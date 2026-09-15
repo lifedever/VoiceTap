@@ -20,13 +20,40 @@ CONTENTS="${APP_BUNDLE}/Contents"
 rm -rf "${BUILD_DIR}"
 mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources"
 
-echo "==> 编译 release"
-swift build -c release
+# 用**当前工具链的 SDK** 构建，同时保持 Package.swift 里声明的最低系统版本。
+#
+# SwiftPM 默认把 LC_BUILD_VERSION 的 sdk 字段也写成 deployment target
+# （minos 14.0 → sdk 也记 14.0）。而系统判断「这 app 是用哪代 SDK 编的」看的
+# 就是这个字段：macOS 26 起的窗口外观（toolbar 那层玻璃，见约束 8）按它分档，
+# 记成 14.0 等于自称老 app，新外观一律拿不到。
+#
+# 两个版本号都现问，不写死：deployment target 的唯一事实源是 Package.swift，
+# SDK 跟着装的那套 Xcode 走。
+MIN_MACOS="$(swift package dump-package | python3 -c '
+import json, sys
+v = [p["version"] for p in json.load(sys.stdin).get("platforms", []) if p["platformName"] == "macos"]
+print(v[0] if v else "")
+')"
+[ -n "${MIN_MACOS}" ] || { echo "❌ 读不到 Package.swift 里的 macOS deployment target"; exit 1; }
+SDK_VER="$(xcrun --show-sdk-version)"
+# 必须传完整三元组：单独给 -sdk_version 会被 SwiftPM 自己那份 -platform_version 盖掉
+LINK_FLAGS=(-Xlinker -platform_version -Xlinker macos -Xlinker "${MIN_MACOS}" -Xlinker "${SDK_VER}")
+
+echo "==> 编译 release（最低 macOS ${MIN_MACOS}，SDK ${SDK_VER}）"
+swift build -c release "${LINK_FLAGS[@]}"
 BIN_PATH="$(swift build -c release --show-bin-path)"
 
 echo "==> 组装 .app"
 rm -rf "${CONTENTS}/MacOS/${APP_NAME}"
 cp "${BIN_PATH}/${APP_NAME}" "${CONTENTS}/MacOS/${APP_NAME}"
+
+# 回读确认两个版本号都落对了。写错是静默的：sdk 记小了拿不到新外观，
+# minos 记大了低版本系统上直接起不来，而本机永远复现不出来。
+ACTUAL="$(vtool -show-build-version "${CONTENTS}/MacOS/${APP_NAME}" | awk '/minos/{m=$2} /sdk/{s=$2} END{print m" "s}')"
+[ "${ACTUAL}" = "${MIN_MACOS} ${SDK_VER}" ] || {
+    echo "❌ 二进制的 minos/sdk 是「${ACTUAL}」，应为「${MIN_MACOS} ${SDK_VER}」"
+    exit 1
+}
 
 # SwiftPM 会为每个带资源的 target 生成 {Package}_{Target}.bundle。
 # 必须 glob 拷贝全部 —— 硬编码单个 bundle 名的话，将来新加一个 SPM 依赖
@@ -60,7 +87,7 @@ cat > "${CONTENTS}/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
-    <key>LSMinimumSystemVersion</key>    <string>14.0</string>
+    <key>LSMinimumSystemVersion</key>    <string>${MIN_MACOS}</string>
     <key>NSHumanReadableCopyright</key>  <string>© 2026 lifedever</string>
     <!-- 默认不占 Dock；打开窗口时代码里临时切到 .regular 显示图标 -->
     <key>LSUIElement</key>               <true/>

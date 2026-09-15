@@ -22,6 +22,25 @@ VERSION="$(tr -d '[:space:]' < VERSION)"
 BUILD_DIR="build"
 ARCHS=(arm64 x86_64)
 
+# 用**当前工具链的 SDK** 构建，同时保持 Package.swift 里声明的最低系统版本。
+#
+# SwiftPM 默认把 LC_BUILD_VERSION 的 sdk 字段也写成 deployment target
+# （minos 14.0 → sdk 也记 14.0）。系统判断「这 app 是用哪代 SDK 编的」看的就是
+# 这个字段：macOS 26 起的窗口外观（toolbar 那层玻璃，见约束 8）按它分档，
+# 记成 14.0 等于自称老 app，新外观一律拿不到。
+#
+# 两个版本号都现问，不写死：deployment target 的唯一事实源是 Package.swift，
+# SDK 跟着装的那套 Xcode 走。
+MIN_MACOS="$(swift package dump-package | python3 -c '
+import json, sys
+v = [p["version"] for p in json.load(sys.stdin).get("platforms", []) if p["platformName"] == "macos"]
+print(v[0] if v else "")
+')"
+[ -n "${MIN_MACOS}" ] || { echo "❌ 读不到 Package.swift 里的 macOS deployment target"; exit 1; }
+SDK_VER="$(xcrun --show-sdk-version)"
+# 必须传完整三元组：单独给 -sdk_version 会被 SwiftPM 自己那份 -platform_version 盖掉
+LINK_FLAGS=(-Xlinker -platform_version -Xlinker macos -Xlinker "${MIN_MACOS}" -Xlinker "${SDK_VER}")
+
 # 开头就把所有中间产物清干净。脚本随时可能被打断，只靠末尾清理会残留暂存目录
 # —— 下一次 cp -R 到已存在的目标就变成「拷进去」而不是「替换」，
 # 打出旧代码 + 新版本号的包（PasteMemo v1.7.12-beta.6 事故）。
@@ -52,7 +71,7 @@ build_one() {
     # 新布局下两个架构**共用同一个输出目录**，上一轮的产物还在原地。
     # 先删掉：万一这次构建没产出，下面立刻就会发现，而不是把上一轮的拷进来。
     rm -f "${bin_dir}/${APP_NAME}"
-    swift build -c release --arch "${arch}"
+    swift build -c release --arch "${arch}" "${LINK_FLAGS[@]}"
     [ -f "${bin_dir}/${APP_NAME}" ] || {
         echo "❌ [${arch}] 构建没有产出 ${bin_dir}/${APP_NAME}"
         exit 1
@@ -70,6 +89,15 @@ build_one() {
         echo "❌ [${arch}] 包里的二进制不是 ${arch}：$(file "${app}/Contents/MacOS/${APP_NAME}")"
         exit 1
     fi
+
+    # 回读确认两个版本号都落对了。写错是静默的：sdk 记小了拿不到新外观，
+    # minos 记大了低版本系统上直接起不来，而本机永远复现不出来。
+    local actual
+    actual="$(vtool -show-build-version "${app}/Contents/MacOS/${APP_NAME}" | awk '/minos/{m=$2} /sdk/{s=$2} END{print m" "s}')"
+    [ "${actual}" = "${MIN_MACOS} ${SDK_VER}" ] || {
+        echo "❌ [${arch}] 二进制的 minos/sdk 是「${actual}」，应为「${MIN_MACOS} ${SDK_VER}」"
+        exit 1
+    }
 
     # SPM 的 .process 资源会生成 {Package}_{Target}.bundle。必须 glob 而不是
     # 写死名字：漏拷一个就是运行时 Bundle.module 直接 SIGTRAP，
@@ -93,7 +121,7 @@ build_one() {
     <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>${VERSION}</string>
     <key>CFBundleVersion</key>           <string>${VERSION}</string>
-    <key>LSMinimumSystemVersion</key>    <string>14.0</string>
+    <key>LSMinimumSystemVersion</key>    <string>${MIN_MACOS}</string>
     <key>NSHumanReadableCopyright</key>  <string>© 2026 lifedever</string>
     <key>LSUIElement</key>               <true/>
 </dict>
