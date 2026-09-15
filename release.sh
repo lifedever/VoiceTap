@@ -42,16 +42,34 @@ build_one() {
     local stage="${BUILD_DIR}/dmg-${arch}"
 
     echo "==> [${arch}] 编译"
+    # 产物路径向 SwiftPM 现问，**不要写死**。工具链换过一次布局
+    # （`.build/<triple>/release` → `.build/out/Products/Release`），而老路径下
+    # 还躺着上一版的产物：cp 照样成功，于是静默打出「旧代码 + 新版本号」的包，
+    # 验包那几项（版本号、嵌套 .app）全都查不出来。0.5.1 上真发生过。
+    local bin_dir
+    bin_dir="$(swift build -c release --arch "${arch}" --show-bin-path | tail -1)"
+
+    # 新布局下两个架构**共用同一个输出目录**，上一轮的产物还在原地。
+    # 先删掉：万一这次构建没产出，下面立刻就会发现，而不是把上一轮的拷进来。
+    rm -f "${bin_dir}/${APP_NAME}"
     swift build -c release --arch "${arch}"
-    # 单架构构建的产物在 .build/<triple>/release；.build/release 只是指向
-    # 「最近一次构建」的符号链接，连续构建两个架构时它会来回切，不能用
-    local bin_dir="${ROOT}/.build/${arch}-apple-macosx/release"
+    [ -f "${bin_dir}/${APP_NAME}" ] || {
+        echo "❌ [${arch}] 构建没有产出 ${bin_dir}/${APP_NAME}"
+        exit 1
+    }
 
     echo "==> [${arch}] 组装 bundle"
     rm -rf "${app}"
     mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
     cp "${bin_dir}/${APP_NAME}" "${app}/Contents/MacOS/${APP_NAME}"
     cp "icons/icon.icns" "${app}/Contents/Resources/AppIcon.icns"
+
+    # 共用输出目录的另一面：拷到上一轮那个架构的产物也不会报错。当场拦下。
+    # 不能靠文件时间判断——cp 出来的 mtime 是拷贝时间，旧产物看着一样新。
+    if ! file "${app}/Contents/MacOS/${APP_NAME}" | grep -q "${arch}"; then
+        echo "❌ [${arch}] 包里的二进制不是 ${arch}：$(file "${app}/Contents/MacOS/${APP_NAME}")"
+        exit 1
+    fi
 
     # SPM 的 .process 资源会生成 {Package}_{Target}.bundle。必须 glob 而不是
     # 写死名字：漏拷一个就是运行时 Bundle.module 直接 SIGTRAP，
