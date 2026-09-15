@@ -58,6 +58,16 @@ enum InputMethodCatalog {
         }
     }
 
+    /// 这个 bundle ID 是本机装着的输入法吗。
+    ///
+    /// 用来把输入法自己的进程从「用户切了 App」里摘出去：输入法的浮窗激活了
+    /// 不代表输入上下文换了地方，当成切 App 处理会把正在进行的语音当场掐断。
+    /// 现装的这两款都是后台进程（`LSBackgroundOnly` / `LSUIElement`）不会激活，
+    /// 但那是它们的 plist 说了算，换一款就不保证了。
+    static func isInputMethod(bundleID: String) -> Bool {
+        inputMethodBundles[bundleID] != nil
+    }
+
     /// 某个输入源现在还在不在（用户可能把它从系统设置里删了）
     static func exists(_ id: String) -> Bool {
         allSelectableSources().contains { property($0, kTISPropertyInputSourceID) == id }

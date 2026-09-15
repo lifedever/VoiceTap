@@ -18,6 +18,17 @@ import CoreAudio
 /// 借了不还 = 用户的输入法被永久改掉，正是这个功能最该避免的后果。所以归还
 /// 必须铺满所有出口（见 `AppDelegate` 和 `PTTController` 的调用点），并且有
 /// 一条无条件的超时兜底。
+///
+/// ## 「归还成功」不等于用户的输入法回来了
+///
+/// 系统设置里的「每个文稿使用不同的输入法」（`TextInputGlobalPropertyPerContextInput`）
+/// 默认开着。开着时 `TISSelectInputSource` 不只是改全局当前输入法，还会被系统
+/// 记进**当前聚焦那个上下文**的输入法记忆里；而归还同样只改得到归还那一刻
+/// 聚焦的那一个。于是只要借用的这几秒里焦点换过 App，被换走的那个 App 就
+/// 永久停在借来的输入法上——下次切回去，系统自动把它恢复成豆包。
+///
+/// 见 `handleAppActivated`：借用期间焦点一变就提前归还（不再污染新的 App），
+/// 并记下污染过的 App，等用户回去时把它改回来。
 @MainActor
 final class InputMethodSwitcher {
 
@@ -60,6 +71,37 @@ final class InputMethodSwitcher {
     /// 还是借来的输入法。这种情况下退回固定延迟。
     private var micBusyAtBorrow = false
 
+    /// 焦点刚变时不能立刻判断当前输入法。
+    ///
+    /// 系统自己的 per-context 恢复也在这一拍——实测前台进程切换到目标输入法
+    /// `Activate Server` 只隔 47ms。抢在它前面读 `currentID()` 拿到的是上一个
+    /// 上下文的值，据此做的判断全是错的。
+    private static let focusSettleDelay: TimeInterval = 0.15
+
+    /// 借用刚开始的这一小段不算「用户切了 App」。
+    ///
+    /// 借用本身会引起一串连锁反应——目标输入法激活、浮窗弹出、目标 App 重新
+    /// 拿回焦点——其中任何一步都可能发出一次激活通知。不留宽限期的话，语音会
+    /// 刚开口就被自己的提前归还掐断，而且掐得很安静：切换、发键、日志全都正常，
+    /// 只有字出不来。`AppDelegate.autoStopGrace` 栽过同一个跟头，取同一量级。
+    private static let focusGrace: TimeInterval = 0.6
+
+    /// 污染补偿的有效期。过了就不再动用户的输入法：隔得太久时，
+    /// 「这个 App 里我用的是哪个输入法」已经变成用户自己的选择了。
+    private static let repairWindow: TimeInterval = 600
+
+    /// 借用期间聚焦过、因此被系统记成「这个 App 用借来的输入法」的那些 App，
+    /// 连同**那一次**借用的「借了谁 / 原本是谁」。
+    ///
+    /// 必须按 App 分别记，不能只留一份最近的：两次借用的原输入法可能不同
+    /// （微信 App 里原本是微信输入法，终端里原本是 ABC），共用一份会在补偿时
+    /// 把前一个 App 改成后一次的原值——用户的输入法被换成一个毫不相干的。
+    /// 每个 App 只补偿一次，补完就移出去，免得反复覆盖用户后来的选择。
+    private var pollutedApps: [String: (borrowed: String, original: String)] = [:]
+    private var borrowStartedAt: Date?
+    private var repairTimer: Timer?
+    private var activationObserver: NSObjectProtocol?
+
     var onLog: ((String) -> Void)?
 
     // MARK: 借
@@ -99,6 +141,12 @@ final class InputMethodSwitcher {
         }
         borrowedID = targetID
         isBorrowing = true
+
+        // 这一次切换已经被系统记进当前 App 的输入法记忆了，先记下来。
+        // 归还只改得到归还那一刻聚焦的那个 App，中途换了焦点这个就修不到。
+        borrowStartedAt = Date()
+        markPolluted(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+        startWatchingActivation()
 
         log("借用 \(InputMethodCatalog.displayName(for: targetID) ?? targetID)（原为 \(current.flatMap(InputMethodCatalog.displayName) ?? "未知")）")
 
@@ -177,6 +225,7 @@ final class InputMethodSwitcher {
         cancelMicWait()
         timeoutTimer?.invalidate()
         timeoutTimer = nil
+        borrowStartedAt = nil
 
         guard isBorrowing, let original = originalID else {
             isBorrowing = false
@@ -204,6 +253,113 @@ final class InputMethodSwitcher {
         micWaitTimer?.invalidate()
         micWaitTimer = nil
         micWaitDeadline = nil
+    }
+
+    // MARK: 「每个文稿使用不同的输入法」的连带污染
+    //
+    // 见类型注释。焦点变化要处理两件事，缺一件都留得下残留：
+    //
+    //   提前归还 —— 借用期间焦点一换 App 就还。再借下去只会把新的那个 App
+    //               也记成借来的输入法，而识别结果此刻已经进不到原来那个
+    //               输入框里了，多借这几秒没有任何收益。
+    //   事后补偿 —— 记下被污染的 App，等用户切回去时如果当时正是借来的那个，
+    //               就改回来。这一条救的是提前归还救不到的：焦点都已经离开了，
+    //               那时候 select 写进去的是**新** App 的记忆。
+    //
+    // 两条判断都要等 `focusSettleDelay`：系统自己的 per-context 恢复也在这一拍。
+
+    private func startWatchingActivation() {
+        guard activationObserver == nil else { return }
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            // 取 userInfo 里那个而不是事后问 frontmostApplication：通知到达时
+            // 后者偶尔还没翻页，读到的是切换**前**那个 App。
+            // 只把 String 带过隔离边界，NSRunningApplication 过不去。
+            let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let bundleID = app?.bundleIdentifier
+            let name = app?.localizedName
+            Task { @MainActor in self?.handleAppActivated(bundleID: bundleID, name: name) }
+        }
+    }
+
+    private func stopWatchingActivation() {
+        // 借用期间这个监听还兼着「焦点一变就提前归还」，不能拆
+        guard !isBorrowing, let observer = activationObserver else { return }
+        NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        activationObserver = nil
+    }
+
+    private func handleAppActivated(bundleID: String?, name: String?) {
+        // 没在借用、也没有待补偿的 App 时这里没有任何事可做。
+        // 放在最前面：下面那个输入法判断要扫目录，不该每次 ⌘Tab 都做一遍
+        guard isBorrowing || !pollutedApps.isEmpty else { return }
+
+        guard let bundleID,
+              bundleID != Bundle.main.bundleIdentifier,
+              !InputMethodCatalog.isInputMethod(bundleID: bundleID) else { return }
+
+        if isBorrowing {
+            // 归还慢一拍的话这个 App 也会被记上，一并盯着。
+            // 宽限期内也要记——那几百毫秒里的污染是真的，只是不该归还
+            markPolluted(bundleID)
+
+            // 刚开口的这一下多半是借用自己的连锁反应，不是用户真的换了地方
+            if let started = borrowStartedAt,
+               Date().timeIntervalSince(started) < Self.focusGrace { return }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.focusSettleDelay) { [weak self] in
+                self?.restoreNow(reason: "切换了 App")
+            }
+            return
+        }
+        repairIfPolluted(bundleID: bundleID, name: name ?? bundleID)
+    }
+
+    /// 记下「这个 App 的输入法记忆刚被我们带偏」，连同当前这次借用的两个 ID。
+    private func markPolluted(_ bundleID: String?) {
+        guard let bundleID,
+              bundleID != Bundle.main.bundleIdentifier,
+              let borrowed = borrowedID,
+              let original = originalID else { return }
+        pollutedApps[bundleID] = (borrowed: borrowed, original: original)
+
+        repairTimer?.invalidate()
+        repairTimer = Timer.scheduledTimer(withTimeInterval: Self.repairWindow, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.endRepairWindow() }
+        }
+    }
+
+    private func endRepairWindow() {
+        repairTimer?.invalidate()
+        repairTimer = nil
+        pollutedApps.removeAll()
+        stopWatchingActivation()
+    }
+
+    /// 切回了一个借用期间被带偏的 App —— 把它的输入法改回去。
+    private func repairIfPolluted(bundleID: String, name: String) {
+        guard let record = pollutedApps[bundleID] else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.focusSettleDelay) { [weak self] in
+            guard let self, !self.isBorrowing else { return }
+            // ⌘Tab 一路划过去的中间站，用户根本没停在这儿：
+            // 此刻的当前输入法不是它的，不能拿来判断，也不该消耗掉那一次机会
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID else { return }
+            guard self.pollutedApps.removeValue(forKey: bundleID) != nil else { return }
+            if self.pollutedApps.isEmpty { self.endRepairWindow() }
+
+            // 已经不是借来的那个了：要么系统压根没记住，要么用户后来自己改过。
+            // 两种都不该动——后者动了就是覆盖用户的选择，正是这个功能最该避免的
+            guard InputMethodCatalog.currentID() == record.borrowed else { return }
+            guard InputMethodCatalog.select(record.original) else {
+                self.log("⚠️ 修正 \(name) 的输入法失败：找不到 \(record.original)")
+                return
+            }
+            let from = InputMethodCatalog.displayName(for: record.borrowed) ?? record.borrowed
+            let to = InputMethodCatalog.displayName(for: record.original) ?? record.original
+            self.log("修正 \(name) 的输入法：\(from) → \(to)（借用时被系统记住了）")
+        }
     }
 
     // MARK: 麦克风占用
